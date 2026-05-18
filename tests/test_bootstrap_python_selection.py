@@ -1,7 +1,39 @@
+import os
 import pathlib
 from unittest.mock import patch
 
 import bootstrap
+
+
+def test_python_probe_checks_openai_pydantic_core_stack(monkeypatch, tmp_path):
+    """Catch partial agent venvs before first chat initializes the OpenAI client."""
+    agent_dir = tmp_path / "agent"
+    calls = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return Result()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    monkeypatch.setenv("PYTHONPATH", "existing-path")
+
+    assert bootstrap._python_can_run_webui_and_agent("/fake/python", agent_dir)
+
+    assert calls
+    args, kwargs = calls[0]
+    assert args[:2] == ["/fake/python", "-c"]
+    probe = args[2]
+    assert "import yaml" in probe
+    assert "from run_agent import AIAgent" in probe
+    assert "import openai" in probe
+    assert "import pydantic_core._pydantic_core" in probe
+    assert kwargs["env"]["PYTHONPATH"].split(os.pathsep)[:2] == [
+        str(agent_dir),
+        "existing-path",
+    ]
 
 
 def test_ensure_python_prefers_agent_venv_when_launcher_cannot_import_agent(monkeypatch, tmp_path):

@@ -500,7 +500,17 @@ def verify_hermes_imports() -> tuple:
     Attempt to import the key Hermes modules.
     Returns (ok: bool, missing: list[str], errors: dict[str, str]).
     """
-    required = ["run_agent"]
+    required = [
+        "run_agent",
+        # The main agent builds OpenAI-compatible clients lazily during the
+        # first chat turn, so a broken SDK/native-extension install can pass a
+        # plain run_agent import and then fail later with
+        # "Failed to initialize OpenAI client". Check the SDK and pydantic-core
+        # binary extension at startup so the existing dependency self-heal path
+        # can run before the user sends a message.
+        "openai",
+        "pydantic_core._pydantic_core",
+    ]
     missing = []
     errors = {}
     for mod in required:

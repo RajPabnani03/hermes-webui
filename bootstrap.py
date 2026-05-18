@@ -166,7 +166,22 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
 
 
 def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
-    script = "import yaml\nfrom run_agent import AIAgent\n"
+    # Keep this probe aligned with the first chat path, not just module import.
+    # ``run_agent`` imports successfully even when some provider SDK pieces are
+    # broken because the OpenAI-compatible client stack is initialized lazily at
+    # AIAgent construction time. Probing the SDK plus pydantic-core's native
+    # extension here catches partial/stale venvs before bootstrap reports a
+    # healthy WebUI that will fail the first OpenAI-compatible turn with:
+    # ``Failed to initialize OpenAI client: No module named
+    # 'pydantic_core._pydantic_core'``.
+    script = "\n".join(
+        [
+            "import yaml",
+            "from run_agent import AIAgent",
+            "import openai",
+            "import pydantic_core._pydantic_core",
+        ]
+    )
     env = os.environ.copy()
     if agent_dir:
         # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
@@ -251,7 +266,8 @@ def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None)
     if _python_can_run_webui_and_agent(str(venv_python), agent_dir):
         return str(venv_python)
     raise RuntimeError(
-        "Python environment cannot import both WebUI dependencies and Hermes Agent. "
+        "Python environment cannot import both WebUI dependencies and Hermes Agent, "
+        "including the OpenAI/Pydantic provider stack. "
         "Set HERMES_WEBUI_PYTHON to the Hermes Agent venv Python or install the "
         "WebUI requirements into that environment."
     )

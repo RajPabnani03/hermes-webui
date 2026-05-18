@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Detect broken OpenAI-compatible provider SDK installs during bootstrap/startup by probing `openai` and the `pydantic_core._pydantic_core` native extension alongside `run_agent`. This catches partial or incompatible Hermes Agent Python environments before bootstrap reports the WebUI healthy and then fails the first chat with `Failed to initialize OpenAI client: No module named 'pydantic_core._pydantic_core'`; direct server startup now covers the same imports in its warning/self-heal diagnostics. Adds troubleshooting guidance for repairing the exact Python environment WebUI is using.
+
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed

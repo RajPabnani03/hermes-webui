@@ -85,6 +85,46 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+## "Failed to initialize OpenAI client: No module named 'pydantic_core._pydantic_core'"
+
+**Symptom.** WebUI starts and `/health` is OK, but the first chat request for an OpenAI-compatible provider fails with this message.
+
+**Why it happens.** The selected Python can import `run_agent`, but the OpenAI SDK's `pydantic-core` native extension is missing or incompatible with that interpreter/architecture. This is common after a partial dependency install, switching Python versions, copying a venv between machines, or pointing `HERMES_WEBUI_PYTHON` at a WebUI-only venv instead of the Hermes Agent environment.
+
+### Step 1 — test the exact Python WebUI uses
+
+Use the `python` path from the WebUI startup banner, then run:
+
+```bash
+PY=/path/from/startup/banner/python
+"$PY" -c "import openai; import pydantic_core._pydantic_core; from run_agent import AIAgent; print('ok')"
+```
+
+If this fails with `pydantic_core._pydantic_core`, repair the dependencies in that same environment. Do not install into a different Python.
+
+### Step 2 — prefer the Hermes Agent Python
+
+If Hermes Agent has its own venv or tool environment, point WebUI at that interpreter:
+
+```bash
+export HERMES_WEBUI_PYTHON=/absolute/path/to/hermes-agent/venv/bin/python
+./start.sh
+```
+
+After this fix, the bootstrap probes `openai` and `pydantic_core._pydantic_core` before reporting the WebUI healthy, so a broken provider SDK stack should fail during startup instead of at first chat. Direct `uvicorn` startup cannot fail the bootstrap readiness check first, but it now includes the same import coverage in its warning/self-heal diagnostics when dependency installation is enabled.
+
+### Step 3 — reinstall the broken packages in-place
+
+If you must keep the current interpreter, force-reinstall the provider SDK stack with that interpreter:
+
+```bash
+"$PY" -m pip install --upgrade --force-reinstall openai pydantic-core
+```
+
+Then restart WebUI and rerun the Step 1 import check.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
