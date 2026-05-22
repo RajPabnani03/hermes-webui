@@ -3,11 +3,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2744** by @Michaelyklam — #1925 RuntimeAdapter RFC follow-up: marks the `runner-local` selection seam shipped in v0.51.105 and defines the next Slice 4d supervised runner route gate before live chat can move onto a runner backend. The gate keeps runner routing default-off, preserves legacy fallback and public response shapes, and carries the Runtime API gap matrix forward so active-run discovery, session→run lookup, command metadata, artifacts, and provider/tool routing do not become private WebUI runtime replicas.
+
 ### Fixed
 
 - Sanitize git fetch diagnostics before returning update-check errors to the browser, preserving useful failure context while redacting credentialed remote URLs, GitHub token shapes, and secret-looking query parameters.
 - **Fixed: per-turn SQLite connection leak in handoff-summary path (#2233)** (Isla Liu, fork prototype). Two functions on the `/api/session/handoff-summary` hot path were opening `sqlite3.connect(...)` inside a bare `with` statement, which commits the transaction at scope exit but does NOT close the connection. Per-turn invocations accumulated `state.db`/`state.db-wal` file descriptors and CPython heap pages on long-lived worker threads, surfacing as the multi-GB VmRSS / 6× duplicated state.db fds observed on PID 434. Wrapped both call sites with `contextlib.closing(...)` (already imported and used at 7 other sites in the same files) so the connection is closed deterministically: `api/models.py::count_conversation_rounds` and `api/routes.py::_persist_handoff_summary_to_state_db`. Regression test `tests/test_issue2233_sqlite_connection_leak.py` loops both functions 20× against a tmp `state.db` and asserts `/proc/<pid>/fd` count does not grow more than 2. Live soak against a freshly-built worktree server confirmed fd growth = 0 and VmRSS growth = 0 KB across 20 POSTs to `/api/session/handoff-summary` — well below the leaked-curve baseline (cold 134 MB → pre-restart 1.27 GB on the unpatched instance). Rollback: single `git revert` reverts both edits.
-
 
 ## [v0.51.107] — 2026-05-21 — Release CE (stage-400 — 8-PR batch — pinned-sessions-limit getter rename + uploaded-file user-turn dedupe + active-run repair guard + incremental KaTeX streaming + profile default model on fresh boot + French locale completion + update-check error surfacing + release-update apply path)
 
