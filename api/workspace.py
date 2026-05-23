@@ -744,6 +744,23 @@ def list_dir(workspace: Path, rel: str='.'):
     return entries
 
 
+_BINARY_SNIFF_BYTES = 8192
+
+
+def _is_binary_file(path: Path) -> bool:
+    """Return True if the file appears to contain binary (non-text) content.
+
+    Reads the first ``_BINARY_SNIFF_BYTES`` bytes and checks for null bytes,
+    which is the same heuristic Git uses for binary detection.
+    """
+    try:
+        with open(path, 'rb') as f:
+            chunk = f.read(_BINARY_SNIFF_BYTES)
+        return b'\x00' in chunk
+    except OSError:
+        return False
+
+
 def read_file_content(workspace: Path, rel: str) -> dict:
     target = safe_resolve_ws(workspace, rel)
     if not target.is_file():
@@ -751,6 +768,8 @@ def read_file_content(workspace: Path, rel: str) -> dict:
     size = target.stat().st_size
     if size > MAX_FILE_BYTES:
         raise ValueError(f"File too large ({size} bytes, max {MAX_FILE_BYTES})")
+    if _is_binary_file(target):
+        return {'path': rel, 'binary': True, 'size': size}
     content = target.read_text(encoding='utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': size, 'lines': content.count('\n') + 1}
 
