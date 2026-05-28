@@ -252,15 +252,19 @@ def audit_session_discoverability(
         parent = _merged_field(sid, stores, "parent_session_id")
         parent_by_id[sid] = str(parent) if parent else None
     api_lineage_ids: set[str] = set()
+    api_lineage_representative_by_id: dict[str, str] = {}
     for sid, row in api.items():
         explicit_root = row.get("_lineage_root_id")
         if explicit_root:
-            api_lineage_ids.add(str(explicit_root))
+            root_id = str(explicit_root)
+            api_lineage_ids.add(root_id)
+            api_lineage_representative_by_id.setdefault(root_id, sid)
         current = sid
         seen: set[str] = set()
         while current and current not in seen:
             seen.add(current)
             api_lineage_ids.add(current)
+            api_lineage_representative_by_id.setdefault(current, sid)
             current = parent_by_id.get(current) or ""
 
     items: list[dict] = []
@@ -282,6 +286,12 @@ def audit_session_discoverability(
         api_computed_is_cli = _computed_is_cli_session(api_row) if api_row else False
         index_is_cli = index_row.get("is_cli_session") is True
         sidecar_is_cli = sidecar.get("is_cli_session") is True
+        lineage_root = _lineage_root(sid, parent_by_id)
+        api_representative = api_lineage_representative_by_id.get(sid) or api_lineage_representative_by_id.get(lineage_root)
+        api_lineage_extra = {
+            "represented_by_api_lineage": bool(api_representative),
+            "api_representative_session_id": api_representative,
+        }
         if webui_origin and api_is_cli and api_computed_is_cli:
             items.append(_new_item(
                 sid,
@@ -295,6 +305,7 @@ def audit_session_discoverability(
                 index_is_cli_session=index_row.get("is_cli_session"),
                 sidecar_is_cli_session=sidecar.get("is_cli_session"),
                 present_in=present_in,
+                **api_lineage_extra,
             ))
         elif webui_origin and (api_is_cli or index_is_cli or sidecar_is_cli):
             items.append(_new_item(
@@ -309,12 +320,12 @@ def audit_session_discoverability(
                 index_is_cli_session=index_row.get("is_cli_session"),
                 sidecar_is_cli_session=sidecar.get("is_cli_session"),
                 present_in=present_in,
+                **api_lineage_extra,
             ))
 
         if message_count <= 0 or sid in api:
             continue
 
-        lineage_root = _lineage_root(sid, parent_by_id)
         is_hidden_snapshot = bool(sidecar.get("pre_compression_snapshot") or index_row.get("pre_compression_snapshot"))
         if sid in api_lineage_ids or lineage_root in api_lineage_ids:
             continue
@@ -406,6 +417,10 @@ def render_discoverability_markdown(report: dict) -> str:
             if isinstance(present, dict):
                 lines.append(
                     "  - present_in: " + ", ".join(f"{k}={v}" for k, v in sorted(present.items()))
+                )
+            if item.get("represented_by_api_lineage"):
+                lines.append(
+                    f"  - represented_by_api_lineage: true via `{item.get('api_representative_session_id')}`"
                 )
     lines.append("")
     return "\n".join(lines)
