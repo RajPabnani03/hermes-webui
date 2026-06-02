@@ -13026,6 +13026,7 @@ const LOCALES = {
     theme_usage: 'Utilisation : /theme ',
     theme_set: 'Thème:',
     no_active_session: 'Aucune session active',
+    provider_mismatch_warning: (m,p)=>`«\u00a0${m}\u00a0» pourrait ne pas fonctionner avec votre fournisseur configuré (${p}). Envoyez quand même, ou exécutez \`hermes model\` dans votre terminal pour changer.`,
     cmd_queue: 'Mettre un message en file d\'attente pour le prochain tour',
     cmd_goal: 'Définir ou inspecter un objectif persistant',
     goal_evaluating_progress: 'Évaluer la progression des objectifs…',
