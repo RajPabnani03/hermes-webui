@@ -620,7 +620,9 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1600]
     busy_pos = inflight_block.find("S.busy=true;")
-    render_pos = inflight_block.find("renderMessages();")
+    # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
+    # call, so match the call form rather than the bare `renderMessages();`.
+    render_pos = inflight_block.find("renderMessages(")
     assert busy_pos >= 0, "loadSession INFLIGHT branch must set S.busy=true"
     assert render_pos >= 0, "loadSession INFLIGHT branch must call renderMessages()"
     assert busy_pos < render_pos, \
