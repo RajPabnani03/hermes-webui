@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.218] — 2026-06-02 — Release GL (stage-p3a — fix getModelLabel mangling URI-scheme model IDs)
+
+### Fixed
+- The composer model chip no longer shows env-var path junk for model IDs that use a URI scheme (e.g. Yandex `gpt://${FOLDER}/deepseek-v4-flash/latest`). A regression from #3366 (v0.51.210): `getModelLabel()` stripped the first `/`-segment, which for a `scheme://` id landed inside the `://` and left `/${FOLDER}/…`. The label now detects a URI scheme, drops scheme + authority, and takes the last meaningful path segment (skipping `${…}` placeholders and bare version tails like `latest`); non-URI multi-slash IDs keep their #3360 behavior (#3429).
+
 ## [v0.51.217] — 2026-06-02 — Release GK (stage-p2f — decode and complete zh-Hant locale strings)
 
 ### Changed
