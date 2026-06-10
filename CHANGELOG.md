@@ -7,6 +7,17 @@
 
 - **New RFC: Stable Assistant Turn Anchors for Live-to-Final rendering.** Defines a frontend presentation/reconciliation model for anchoring one assistant turn across live streaming, settlement, replay/reload/recovery, Compact Worklog, Transparent Stream, terminal states, artifacts, and side effects. (#3926)
 
+## [v0.51.352] — 2026-06-10 — Release LP (medium round: jump-to-response, STATE_DIR warning, J/K nav)
+
+### Added
+
+- **J/K keyboard shortcuts navigate the session list.** Pressing `j` selects the next session and `k` the previous one (vim-style), guarded so they never fire while typing in the composer or any input/textarea/contenteditable, and modifier-key combos are ignored. (#3941, closes #3845)
+
+### Fixed
+
+- **The per-turn jump button now scrolls to the start of the response, not the user's question.** The ↑ jump affordance on an assistant turn now scrolls to the assistant segment (the start of the response) instead of the user message above it. It targets the first *visible* segment — a folded-Worklog turn whose first segment is hidden no longer suppresses the fallback — and falls back to the question row when no visible response segment is found. Label updated to "to response" across all locales. (#3934, closes #3852)
+- **Startup now warns when the session store is empty but a sibling state directory has sessions.** When `SESSION_DIR` has no session files and the index is empty/absent, `print_startup_config()` scans sibling state directories and, if it finds one with session data, prints a diagnostic pointing at it and the `HERMES_WEBUI_STATE_DIR` to set — so a user who switched launch methods (bootstrap.py / ctl.sh / systemd) and sees an empty sidebar knows their sessions aren't lost. Fully fail-safe (warning only, no behavior change). (#3939, closes #3915)
+
 ## [v0.51.351] — 2026-06-10 — Release LO (Phase 0 brick batch: data-loss + mobile stream reattach)
 
 ### Fixed
