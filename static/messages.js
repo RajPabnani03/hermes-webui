@@ -1423,6 +1423,35 @@ async function send(){
 
 const LIVE_STREAMS={};
 
+// #4416: track whether the tab was hidden at ANY point during a live stream, so
+// the response-complete notification fires for a backgrounded tab even when
+// Chromium throttles the background-tab SSE and delivers the `done` event LATE
+// (after the user returns, when document.hidden already reads false). Each entry
+// is STREAM-OWNED ({streamId, wasHidden}) so a stale entry left by a non-`done`
+// terminal path (apperror/cancel/stream-error/reconnect-no-active) can never be
+// mis-attributed to a later stream for the same session id — a reconnect only
+// keeps the prior state when the streamId matches. One idempotent
+// visibilitychange listener (never leaks) flips wasHidden on all active entries.
+const _STREAM_WAS_HIDDEN={};
+let _streamHiddenTrackerBound=false;
+function _bindStreamHiddenTracker(){
+  if(_streamHiddenTrackerBound||typeof document==='undefined'||typeof document.addEventListener!=='function') return;
+  _streamHiddenTrackerBound=true;
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){ for(const k in _STREAM_WAS_HIDDEN){ const e=_STREAM_WAS_HIDDEN[k]; if(e) e.wasHidden=true; } }
+  });
+}
+function _clearStreamHidden(sid, streamId){
+  // Clear only when we own the current stream's entry (or unconditionally when
+  // streamId is omitted). Prevents a terminal path for an old stream from wiping
+  // a newer stream's tracker.
+  if(!sid) return;
+  const e=_STREAM_WAS_HIDDEN[sid];
+  if(!e) return;
+  if(streamId&&e.streamId&&e.streamId!==streamId) return;
+  delete _STREAM_WAS_HIDDEN[sid];
+}
+
 function closeLiveStream(sessionId, streamId, source){
   const live=LIVE_STREAMS[sessionId];
   if(!live) return;
@@ -1489,6 +1518,18 @@ function closeOtherLiveStreams(activeSid){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  // #4416: start (or, on reconnect for the SAME stream, keep) tracking whether
+  // the tab was hidden during this stream so the done-notification fires for a
+  // backgrounded tab. A reconnect with a different streamId re-seeds (the old
+  // entry belonged to a prior stream).
+  _bindStreamHiddenTracker();
+  {
+    const _prev=_STREAM_WAS_HIDDEN[activeSid];
+    const _keep=reconnecting&&_prev&&_prev.streamId===streamId;
+    if(!_keep){
+      _STREAM_WAS_HIDDEN[activeSid]={streamId,wasHidden:(typeof document!=='undefined'&&!!document.hidden)};
+    }
+  }
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
@@ -1756,6 +1797,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
+    _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
     _flushReasoningToAnchor();
     _scheduleAnchorRegistryCleanup();
     _clearApprovalForOwner();
@@ -3532,7 +3574,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
+        // #4416: notify if the tab was hidden at ANY point during this stream
+        // (not just at done-receive time, which a throttled background-tab SSE
+        // delivers late — after the user returns and document.hidden is false).
+        // If the user watched the whole stream, _wasEverHidden stays false and
+        // the notification is suppressed (matches Slack/Discord/Gmail/Claude).
+        const _hiddenEntry=_STREAM_WAS_HIDDEN[activeSid];
+        const _wasEverHidden=!!(_hiddenEntry&&_hiddenEntry.wasHidden);
+        _clearStreamHidden(activeSid, streamId);
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{forceHidden:_wasEverHidden,sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -3697,6 +3747,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // This is distinct from the SSE network 'error' event below.
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
+      _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       let d={};
@@ -3869,6 +3920,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       try{if(source&&source.readyState!==2)source.close();}catch(_){ }
       _clearOwnerInflightState();
+      _clearStreamHidden(activeSid, streamId);  // #4416: terminal path, drop hidden tracker
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
       let _cancelData={};
@@ -5351,7 +5403,15 @@ function requestNotificationPermission(){
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
-  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  // #4416: `forceHidden` means the caller already determined the tab was hidden
+  // during the relevant window (e.g. a stream that ran while backgrounded), so
+  // the live `document.hidden` visibility gate — which a late, throttled SSE
+  // makes unreliable — should be treated as satisfied. The user's
+  // notifications-enabled SETTING is still honored (unlike `force`, which is the
+  // explicit "Send test" override); only the visibility gate is bypassed.
+  const forceHidden=!!(options&&options.forceHidden);
+  if(!force&&!window._notificationsEnabled) return;
+  if(!force&&!forceHidden&&!document.hidden) return;
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
     _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
