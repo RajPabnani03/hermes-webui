@@ -50,7 +50,6 @@ def test_continuation_lookup_is_profile_scoped(tmp_path, monkeypatch):
     filtered out, while the same-profile child resolves. Guards against a
     crafted/colliding foreign-profile sidecar leaking cross-profile.
     """
-    import types
     from api import routes, config
 
     class _S:
