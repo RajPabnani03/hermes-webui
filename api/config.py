@@ -485,11 +485,16 @@ def reload_config() -> None:
         _cfg_path = config_path
         _cfg_mtime = 0.0
         try:
-            import yaml as _yaml
-
             if config_path.exists():
-                loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
+                # Route the parse through the mtime-keyed cache (#4652) so an
+                # unchanged config.yaml isn't re-parsed (~125ms+ on a large file)
+                # on every reload_config() on the hot path (profile switch /
+                # load_settings, #4662 Phase 2). We take the RAW cached dict and
+                # run the env expansion HERE, pinned to the unscoped process-env
+                # view (below) — never the helper's per-call expansion — for the
+                # #798 TLS reason documented in the pin block.
+                loaded = _load_yaml_config_file_raw(config_path)
+                if isinstance(loaded, dict) and loaded:
                     # The process-global _cfg_cache must reflect PROCESS-env
                     # expansion, never a profile-scoped block_process_env_fallback
                     # view — otherwise a reload that fires while a readonly/worker
@@ -544,7 +549,17 @@ _yaml_file_cache: dict[str, tuple] = {}
 _yaml_file_cache_lock = threading.Lock()
 
 
-def _load_yaml_config_file(config_path: Path) -> dict:
+def _load_yaml_config_file_raw(config_path: Path) -> dict:
+    """Return the RAW (un-env-expanded) parsed config dict, memoized on
+    (resolved path, st_mtime_ns, st_size). Shared parse core for
+    _load_yaml_config_file() and reload_config(): the former runs the helper's
+    own per-call env expansion on the result; the latter must run expansion
+    under its own process-env-pinned thread context (#798), so it takes the raw
+    dict and expands it itself. Either way the file is parsed at most once per
+    (mtime, size) — a UI sync storm can't turn into a YAML-reparse storm (#4650),
+    and an unchanged config.yaml isn't reparsed on the profile-switch hot path
+    (#4662 Phase 2).
+    """
     try:
         import yaml as _yaml
     except ImportError:
@@ -561,8 +576,8 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     with _yaml_file_cache_lock:
         cached = _yaml_file_cache.get(cache_key)
         if cached is not None and cached[0] == stat_key:
-            expanded = _expand_env_vars(cached[1])
-            return expanded if isinstance(expanded, dict) else {}
+            raw = cached[1]
+            return raw if isinstance(raw, dict) else {}
 
     # Cache miss / stale: parse off disk. Done outside the lock so a slow parse
     # doesn't serialize unrelated paths; a concurrent duplicate parse is harmless.
@@ -575,6 +590,11 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     raw = loaded if isinstance(loaded, dict) else {}
     with _yaml_file_cache_lock:
         _yaml_file_cache[cache_key] = (stat_key, raw)
+    return raw
+
+
+def _load_yaml_config_file(config_path: Path) -> dict:
+    raw = _load_yaml_config_file_raw(config_path)
     if not raw:
         return {}
     expanded = _expand_env_vars(raw)
