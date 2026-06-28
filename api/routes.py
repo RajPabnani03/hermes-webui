@@ -18235,6 +18235,53 @@ def _handle_chat_sync(handler, body):
     )
 
 
+def _selected_profile_snapshot_updates(
+    profile: str | None,
+    *,
+    provider,
+    model,
+    base_url=None,
+    no_agent=False,
+) -> dict[str, str | None]:
+    selected_profile = str(profile or "").strip()
+    if not selected_profile or (provider is not None and model is not None):
+        return {}
+
+    try:
+        from api.profiles import profile_env_for_background_worker
+        from cron.jobs import _compute_provider_model_snapshots
+    except Exception:
+        logger.debug("Failed to load cron snapshot repair helpers", exc_info=True)
+        return {}
+
+    try:
+        with profile_env_for_background_worker(
+            selected_profile,
+            "cron create snapshot",
+            logger_override=logger,
+        ):
+            provider_snapshot, model_snapshot = _compute_provider_model_snapshots(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                no_agent=no_agent,
+            )
+    except Exception:
+        logger.debug(
+            "Failed to compute selected-profile cron snapshots for %s",
+            selected_profile,
+            exc_info=True,
+        )
+        return {}
+
+    updates = {}
+    if provider is None:
+        updates["provider_snapshot"] = provider_snapshot
+    if model is None:
+        updates["model_snapshot"] = model_snapshot
+    return updates
+
+
 def _handle_cron_create(handler, body):
     try:
         require(body, "prompt", "schedule")
@@ -18245,18 +18292,27 @@ def _handle_cron_create(handler, body):
 
         profile = _normalize_cron_profile_value(body.get("profile"))
         toast_notifications = body.get("toast_notifications") is not False
+        requested_model = body.get("model") or None
+        requested_provider = body.get("provider") or None
         job = create_job(
             prompt=body["prompt"],
             schedule=body["schedule"],
             name=body.get("name") or None,
             deliver=body.get("deliver") or "local",
             skills=body.get("skills") or [],
-            model=body.get("model") or None,
-            provider=body.get("provider") or None,
+            model=requested_model,
+            provider=requested_provider,
         )
         post_create_updates = {}
         if profile is not None:
             post_create_updates["profile"] = profile
+            post_create_updates.update(
+                _selected_profile_snapshot_updates(
+                    profile,
+                    provider=requested_provider,
+                    model=requested_model,
+                )
+            )
         if not toast_notifications:
             post_create_updates["toast_notifications"] = False
         if post_create_updates:
