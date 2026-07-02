@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+from tests.js_source_extract import extract_function
+
 ROOT = Path(__file__).resolve().parents[1]
 INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
@@ -48,7 +50,11 @@ def test_kanban_has_sidebar_panel_and_main_board_mounts():
 
 
 def test_switch_panel_lazy_loads_kanban_and_toggles_main_view():
-    assert "'kanban'" in re.search(r"\[[^\]]+\]\.forEach\(p => \{\s*mainEl\.classList", PANELS).group(0)
+    main_view_panels = re.search(r"const MAIN_VIEW_PANELS = \[([^\]]+)\];", PANELS)
+    assert main_view_panels, "MAIN_VIEW_PANELS should define main-view panels"
+    assert "'kanban'" in main_view_panels.group(1)
+    assert "MAIN_VIEW_PANELS.forEach(p => {" in PANELS
+    assert "mainEl.classList.toggle('showing-' + p, nextPanel === p);" in PANELS
     assert "if (nextPanel === 'kanban') await loadKanban();" in PANELS
     assert "if (_currentPanel === 'kanban') await loadKanban();" in PANELS
 
@@ -522,6 +528,15 @@ def test_kanban_dispatcher_inflight_guard_prevents_double_click_toast_confusion(
     assert 'btnKanbanPreviewDispatcher' in INDEX
 
 
+def test_kanban_dispatcher_no_longer_blocks_default_board():
+    """Pin removal of the previous null-board guard in runKanbanDispatcher()."""
+    run_source = extract_function(PANELS, "runKanbanDispatcher", prefix="async function")
+    assert "if (!_kanbanCurrentBoard)" not in run_source, (
+        "runKanbanDispatcher() must not block when _kanbanCurrentBoard is null; "
+        "default board should dispatch through a board-less path."
+    )
+
+
 def test_kanban_board_has_native_css_classes():
     for selector in (
         ".kanban-board",
@@ -690,6 +705,65 @@ def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes(
         assert token in PANELS
     assert "target=\"_blank\" rel=\"noopener noreferrer\"" in PANELS
     assert "javascript:" not in PANELS.lower()
+
+
+def test_kanban_dragging_card_does_not_open_detail_on_drop_click():
+    """Regression: drag/drop should move a card without opening task detail."""
+    assert "function _kanbanSuppressNextCardClick" in PANELS
+    assert "let _kanbanSuppressCardClickUntil" in PANELS
+    assert "function openKanbanCard" in PANELS
+    assert "function finishKanbanDrag" in PANELS
+
+    drag_fn = re.search(r"function dragKanbanTask\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert drag_fn, "dragKanbanTask() not found"
+    assert "_kanbanSuppressNextCardClick" in drag_fn.group(1), (
+        "drag start must arm the click suppressor so the trailing click after "
+        "drop cannot open the task detail pane"
+    )
+
+    finish_fn = re.search(r"function finishKanbanDrag\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert finish_fn, "finishKanbanDrag() not found"
+    assert "_kanbanSuppressNextCardClick" in finish_fn.group(1), (
+        "drag end must refresh the suppressor window before browsers emit a "
+        "trailing synthetic click"
+    )
+
+    drop_fn = re.search(r"async function dropKanbanTask\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert drop_fn, "dropKanbanTask() not found"
+    drop_body = drop_fn.group(1)
+    assert "_kanbanSuppressNextCardClick" in drop_body
+    assert "event.stopPropagation()" in drop_body
+    assert "updateKanbanTask(taskId, {status}, {openDetail: false})" in drop_body, (
+        "drag/drop status updates must refresh the board without opening the task detail"
+    )
+
+    update_fn = re.search(r"async function updateKanbanTask\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert update_fn, "updateKanbanTask() not found"
+    update_body = update_fn.group(1)
+    assert "const openDetail = !opts || opts.openDetail !== false;" in update_body
+    assert "if (openDetail) await loadKanbanTask" in update_body
+
+    card_template = re.search(r"return `<article class=\"kanban-card.*?</article>`;", PANELS, re.DOTALL)
+    assert card_template, "Kanban card template not found"
+    card_html = card_template.group(0)
+    assert "ondragend=\"finishKanbanDrag(event)\"" in card_html
+    assert "onclick=\"return openKanbanCard(event," in card_html
+    assert "onclick=\"loadKanbanTask" not in card_html, (
+        "Kanban cards must not call loadKanbanTask directly from onclick; "
+        "drag/drop needs a guarded click path"
+    )
+
+    open_fn = re.search(r"function openKanbanCard\([^)]*\)\{(.*?)\n\}", PANELS, re.DOTALL)
+    assert open_fn, "openKanbanCard() not found"
+    open_body = open_fn.group(1)
+    for token in (
+        "Date.now()",
+        "_kanbanSuppressCardClickUntil",
+        "preventDefault",
+        "stopPropagation",
+        "loadKanbanTask",
+    ):
+        assert token in open_body
 
 
 def test_kanban_lifecycle_controls_do_not_offer_manual_running_start():
@@ -874,6 +948,28 @@ def test_kanban_board_switcher_handlers_in_panels():
         assert fn in PANELS, f"Missing handler: {fn}"
 
 
+def test_kanban_board_switcher_icon_column_clamps_long_labels():
+    """Regression for #2458: board metadata may use a short text label in the
+    icon/color slot. The menu must keep that label inside its own column instead
+    of letting it overlap the board title and count badge.
+    """
+    rule = re.search(
+        r"\.kanban-board-switcher-item-icon\{(?P<body>.*?)\}",
+        STYLE,
+        flags=re.S,
+    )
+    assert rule, "missing .kanban-board-switcher-item-icon CSS rule"
+    compact = re.sub(r"\s+", "", rule.group("body"))
+    for required in (
+        "overflow:hidden",
+        "text-overflow:ellipsis",
+        "white-space:nowrap",
+        "max-width:7.5rem",
+        "min-width:18px",
+    ):
+        assert required in compact
+
+
 def test_kanban_board_switcher_calls_correct_endpoints():
     """The switcher must hit the right REST verbs to round-trip with the
     bridge's multi-board contract."""
@@ -1022,17 +1118,11 @@ def test_kanban_board_color_is_validated_against_css_injection():
     """
     import json
     import subprocess
+    fn_source = extract_function(PANELS, "_kanbanSafeColor")
     script = """
-const fs = require('fs');
-const src = fs.readFileSync('static/panels.js', 'utf8');
-const start = src.indexOf('function _kanbanSafeColor');
-if (start < 0) { console.error('_kanbanSafeColor missing'); process.exit(2); }
-// Grab the function body up to and including the closing `}` line.
-const tail = src.slice(start);
-const end = tail.indexOf('\\n}\\n') + 2;
-const fn = tail.slice(0, end);
+const fnSource = __FN__;
 const ctx = {};
-new Function('out', fn + '; out.fn = _kanbanSafeColor;')(ctx);
+new Function('out', fnSource + '; out.fn = _kanbanSafeColor;')(ctx);
 const cases = [
   ['#fff', '#fff'],
   ['#3b82f6', '#3b82f6'],
@@ -1052,7 +1142,7 @@ const results = cases.map(([input, expected]) => ({
   input, expected, actual: ctx.fn(input)
 }));
 console.log(JSON.stringify(results));
-"""
+""".replace("__FN__", json.dumps(fn_source))
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     results = json.loads(result.stdout)
     failures = [r for r in results if r["actual"] != r["expected"]]
@@ -1110,3 +1200,120 @@ def test_kanban_locale_parity():
     assert not failures, (
         "Kanban i18n key parity violations:\n" + "\n".join(failures)
     )
+
+
+def test_kanban_profile_lanes_explicitly_render_unassigned_lane():
+    """Regression: unassigned Ready tasks must not disappear when the board is
+    grouped by profile/lane. Mobile users should see an explicit Unassigned
+    lane via a stable internal key instead of needing tasks assigned to
+    `default` for visibility.
+    """
+    assert "function _kanbanLaneNames" in PANELS
+    assert "function _kanbanRenderProfileLanes" in PANELS
+    assert "KANBAN_UNASSIGNED_LANE" in PANELS
+    assert "function _kanbanLaneKey" in PANELS
+    assert "function _kanbanLaneLabel" in PANELS
+    assert "kanban_unassigned" in PANELS
+
+    # Lane key helper returns the constant for tasks without an assignee.
+    assert "KANBAN_UNASSIGNED_LANE" in PANELS
+    # Lane label helper converts the constant back to a translated string.
+    assert "t('kanban_unassigned')" in PANELS
+
+    # _kanbanLaneNames uses _kanbanLaneKey to build the set, not raw assignee.
+    lane_names_match = re.search(
+        r"function _kanbanLaneNames\(columns\)\{(.*?)\nfunction ",
+        PANELS,
+        re.DOTALL,
+    )
+    assert lane_names_match, "_kanbanLaneNames() not found"
+    lane_names_body = lane_names_match.group(1)
+    assert "_kanbanLaneKey(task)" in lane_names_body
+    # Unassigned lane is appended last (after assigned lanes).
+    assert "has(KANBAN_UNASSIGNED_LANE)" in lane_names_body
+
+    # _kanbanRenderProfileLanes uses _kanbanLaneKey for filtering and
+    # _kanbanLaneLabel for display, and emits the unassigned CSS class.
+    render_match = re.search(
+        r"function _kanbanRenderProfileLanes\(columns\)\{(.*?)\nfunction ",
+        PANELS,
+        re.DOTALL,
+    )
+    assert render_match, "_kanbanRenderProfileLanes() not found"
+    render_body = render_match.group(1)
+    assert "_kanbanLaneNames(columns)" in render_body
+    assert "_kanbanLaneKey(task)" in render_body
+    assert "_kanbanLaneLabel(lane)" in render_body
+    assert "kanban-profile-lane-unassigned" in render_body
+    assert "kanban-profile-lane" in render_body
+
+
+def test_kanban_hidden_by_filters_ux():
+    """When all tasks are filtered by the text search but unfiltered data
+    exists, the board should show an explanation and a Clear filters button
+    instead of a generic 'No Kanban data' empty state.
+    """
+    # The helper functions exist.
+    assert "function _kanbanHiddenByFiltersHtml" in PANELS
+    assert "function clearKanbanFilters" in PANELS
+
+    # The empty-board branch checks unfiltered total.
+    render_match = re.search(
+        r"function _kanbanRenderBoard\(\)\{(.*?)\nfunction ",
+        PANELS,
+        re.DOTALL,
+    )
+    assert render_match, "_kanbanRenderBoard() not found"
+    render_body = render_match.group(1)
+    assert "_kanbanHiddenByFiltersHtml" in render_body
+    assert "unfilteredTotal" in render_body
+
+    # The hidden-html helper references the i18n keys.
+    hidden_match = re.search(
+        r"function _kanbanHiddenByFiltersHtml\(\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert hidden_match, "_kanbanHiddenByFiltersHtml() not found"
+    hidden_body = hidden_match.group(1)
+    assert "kanban_tasks_hidden_by_filters" in hidden_body
+    assert "kanban_clear_filters" in hidden_body
+    assert "clearKanbanFilters()" in hidden_body
+
+    # clearKanbanFilters() resets all filter inputs and reloads.
+    clear_match = re.search(
+        r"function clearKanbanFilters\(\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert clear_match, "clearKanbanFilters() not found"
+    clear_body = clear_match.group(1)
+    assert "kanbanSearch" in clear_body
+    assert "kanbanAssigneeFilter" in clear_body
+    assert "kanbanTenantFilter" in clear_body
+    assert "loadKanban(true)" in clear_body
+
+    # i18n keys exist in every locale.
+    locale_blocks = _locale_blocks_with_body(I18N)
+    for key in ("kanban_tasks_hidden_by_filters", "kanban_clear_filters"):
+        missing = [
+            locale
+            for locale, body in locale_blocks
+            if re.search(rf"\b{re.escape(key)}\s*:", body) is None
+        ]
+        assert missing == [], f"i18n key '{key}' missing from locales: {missing}"
+
+
+def test_kanban_unassigned_lane_in_sidebar_meta():
+    """Sidebar task list must show 'unassigned' label for tasks without an
+    assignee, not silently omit the field.
+    """
+    meta_match = re.search(
+        r"function _kanbanTaskMeta\(task\)\{(.*?)\n\}",
+        PANELS,
+        re.DOTALL,
+    )
+    assert meta_match, "_kanbanTaskMeta() not found"
+    meta_body = meta_match.group(1)
+    # Must emit unassigned label when task.assignee is falsy.
+    assert "t('kanban_unassigned')" in meta_body

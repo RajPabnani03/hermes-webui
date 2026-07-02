@@ -85,6 +85,16 @@ def make_session_tracked(created_list, ws=None):
     return sid, pathlib.Path(d["session"]["workspace"])
 
 
+def _make_session_visible(sid):
+    data, status = post("/api/chat/start", {
+        "session_id": sid,
+        "message": "visible row",
+        "model": "openai/gpt-5.4-mini",
+    })
+    assert status == 200, f"chat/start failed with {status}: {data}"
+    get(f"/api/chat/cancel?stream_id={urllib.parse.quote(data['stream_id'])}")
+
+
 
 # ──────────────────────────────────────────────
 # Health check (prerequisite for all tests)
@@ -124,18 +134,19 @@ def test_session_create_and_load():
     sid = data["session"]["session_id"]
     assert len(sid) == 12  # uuid4().hex[:12]
 
-    # Give it a title so it's visible in the session list (empty Untitled sessions are filtered)
+    # Load it directly
+    loaded = get(f"/api/session?session_id={sid}")
+    assert loaded["session"]["session_id"] == sid
+    assert loaded["session"]["messages"] == []
+
+    # Give it a real message so the default sidebar route keeps it visible.
+    _make_session_visible(sid)
     post("/api/session/rename", {"session_id": sid, "title": "test-create-verify"})
 
     # Verify it appears in /api/sessions list
     sessions = get("/api/sessions")
     sids = [s["session_id"] for s in sessions["sessions"]]
     assert sid in sids, f"New session {sid} not in sessions list"
-
-    # Load it directly
-    loaded = get(f"/api/session?session_id={sid}")
-    assert loaded["session"]["session_id"] == sid
-    assert loaded["session"]["messages"] == []
 
     # Cleanup
     post("/api/session/delete", {"session_id": sid})
@@ -207,14 +218,16 @@ def test_session_delete_nonexistent():
 
 def test_sessions_list_sorted():
     """Sessions list should be sorted most-recently-updated first."""
-    # Create two sessions with a title so they're visible (empty Untitled sessions are filtered)
+    # Create two sessions with a real message so the default sidebar route keeps them visible.
     a, _ = post("/api/session/new", {})
     time.sleep(0.05)
     b, _ = post("/api/session/new", {})
     sid_a = a["session"]["session_id"]
     sid_b = b["session"]["session_id"]
+    _make_session_visible(sid_a)
     post("/api/session/rename", {"session_id": sid_a, "title": "test-sort-a"})
     time.sleep(0.05)
+    _make_session_visible(sid_b)
     post("/api/session/rename", {"session_id": sid_b, "title": "test-sort-b"})
 
     sessions = get("/api/sessions")
@@ -350,6 +363,24 @@ def test_upload_respects_attachment_dir_env(monkeypatch, tmp_path):
     assert dest == inbox.resolve() / "session-123" / "notes.md"
     assert dest.parent.exists()
     assert _session_attachment_dir("session-123") == inbox.resolve() / "session-123"
+
+
+def test_upload_destination_does_not_overwrite_same_filename(monkeypatch, tmp_path):
+    """Repeated uploads with the same filename in one session keep distinct paths."""
+    from api.upload import _upload_destination
+
+    inbox = tmp_path / "attachment-inbox"
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(inbox))
+
+    first = _upload_destination("session-123", "photo.png")
+    first.write_bytes(b"first")
+    second = _upload_destination("session-123", "photo.png")
+    second.write_bytes(b"second")
+
+    assert first.name == "photo.png"
+    assert second.name == "photo-1.png"
+    assert first.read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
 
 
 def test_upload_too_large(cleanup_test_sessions):
