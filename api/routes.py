@@ -13018,19 +13018,22 @@ def handle_post(handler, parsed) -> bool:
         # ── Memory lifecycle: commit the previous session before starting a new one ──
         prev_session_id = body.get("prev_session_id")
         if prev_session_id:
-            if not _session_id_visible_to_request_profile(handler, prev_session_id):
-                return True
-            try:
-                from api.session_lifecycle import commit_session_memory
-                from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
-                prev_agent = None
-                with SESSION_AGENT_CACHE_LOCK:
-                    _cached = SESSION_AGENT_CACHE.get(prev_session_id)
-                    if _cached:
-                        prev_agent = _cached[0]
-                commit_session_memory(prev_session_id, agent=prev_agent)
-            except Exception:
-                logger.debug("Lifecycle commit for prev_session %s failed", prev_session_id, exc_info=True)
+            if not _session_id_visible_to_request_profile(handler, prev_session_id, emit_error=False):
+                # Cross-profile prev session (e.g. after profile switch): skip
+                # memory commit but still create the new session.
+                prev_session_id = None
+            else:
+                try:
+                    from api.session_lifecycle import commit_session_memory
+                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    prev_agent = None
+                    with SESSION_AGENT_CACHE_LOCK:
+                        _cached = SESSION_AGENT_CACHE.get(prev_session_id)
+                        if _cached:
+                            prev_agent = _cached[0]
+                    commit_session_memory(prev_session_id, agent=prev_agent)
+                except Exception:
+                    logger.debug("Lifecycle commit for prev_session %s failed", prev_session_id, exc_info=True)
         s = new_session(
             workspace=workspace,
             model=model,
@@ -14604,7 +14607,6 @@ def handle_post(handler, parsed) -> bool:
         # #1614: refuse moves into a project owned by another profile.
         target_pid = body.get("project_id") or None
         if target_pid:
-            from api.profiles import get_active_profile_name
             # Use the session's own profile for authorization, not the global
             # active profile. A session belongs to a specific profile set at
             # creation; projects from that profile should always be assignable,
@@ -14654,7 +14656,6 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         import re as _re
-        from api.profiles import get_active_profile_name
 
         name = body["name"].strip()[:128]
         if not name:
@@ -14689,7 +14690,6 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         import re as _re
-        from api.profiles import get_active_profile_name
 
         projects = load_projects()
         proj = next(
@@ -14715,7 +14715,6 @@ def handle_post(handler, parsed) -> bool:
             require(body, "project_id")
         except ValueError as e:
             return bad(handler, str(e))
-        from api.profiles import get_active_profile_name
         projects = load_projects()
         proj = next(
             (p for p in projects if p["project_id"] == body["project_id"]), None
