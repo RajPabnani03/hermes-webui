@@ -13,9 +13,13 @@ Before making changes, read:
 2. `CONTRIBUTING.md`
 3. `docs/CONTRACTS.md`
 4. `CHANGELOG.md`
+5. `docs/agent-knowledge.md` for the repository map: architecture, state
+   layers, test harness behavior, and investigation checklist
 
 For architecture, testing, or setup work, also read the matching reference:
 
+- `docs/agent-knowledge.md` for a single onboarding map (start here for
+  exploration or pre-integration work)
 - `ARCHITECTURE.md` for design constraints and current module layout
 - `TESTING.md` for local verification commands and manual test guidance
 - `docs/onboarding.md` for first-run onboarding behavior
