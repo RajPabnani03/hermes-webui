@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Profile switch no longer breaks new session creation.** Removed redundant local
+  imports of `get_active_profile_name` inside `handle_post()` that shadowed the
+  module-level binding and could raise `UnboundLocalError` on `/api/session/new`.
+  Cross-profile `prev_session_id` after a profile switch now skips the memory
+  commit instead of returning 404, so the sidebar recovers without a hard
+  refresh. Closes #5420.
+
 ### Documentation
 
 - Add `docs/agent-knowledge.md` as the agent onboarding map for architecture,
