@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- Add `docs/agent-knowledge.md` as the agent onboarding map for architecture,
+  state layers, test harness behavior, and pre-integration investigation.
+  Link it from `AGENTS.md` read-first list.
+
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
 ### Changed
