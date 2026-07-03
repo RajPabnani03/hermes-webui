@@ -90,3 +90,46 @@ python3 bootstrap.py
 
 Do not include private machine instructions in this tracked file. Use a
 git-ignored local note for personal workflow details.
+
+## Cursor Cloud specific instructions
+
+The startup update script provisions the repo-local `.venv` (from
+`requirements-dev.txt`) and `node_modules` (ESLint runtime guard). After startup
+you can run tests/lint directly against those.
+
+- **Tests:** run through `./scripts/test.sh` (see `README.md` > "Running tests").
+  It reuses the pre-provisioned `.venv`.
+- **Git-signing gotcha (important):** the full suite occasionally fails with
+  `git commit ... timed out after 20 seconds` in `tests/test_workspace_git.py`.
+  This is **not** a code bug — those tests spawn `git` with the ambient
+  environment, and the Cloud VM's global git config enables `commit.gpgsign`
+  (SSH signing helper) plus `core.fsmonitor`, which makes `git commit` in the
+  many temp repos slow/hang. Run the suite (or that file) with a
+  signing-disabled global config to keep it deterministic, e.g.:
+
+  ```bash
+  printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[core]\n\tfsmonitor = false\n\tuntrackedcache = false\n' > /tmp/git-clean-config
+  GIT_CONFIG_GLOBAL=/tmp/git-clean-config ./scripts/test.sh
+  ```
+
+  Do not globally disable `commit.gpgsign` — the agent's own commits are signed;
+  scope the override to the test run only.
+- **Lint:** ruff gate `python3 scripts/ruff_lint.py --diff origin/master` (whole
+  tree `--all` is informational backlog per `#3273`); ESLint runtime guard
+  `npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"`.
+  `scripts/scope_undef_gate.py` needs an `eslint` binary on `PATH` (else it
+  self-skips) — run it as `PATH="$PWD/node_modules/.bin:$PATH" python3 scripts/scope_undef_gate.py`.
+- **Running the app:** `bootstrap.py` tries to auto-install the external Hermes
+  Agent, which is not present here. To run the WebUI itself against isolated
+  state without the agent, launch `server.py` directly with the `.venv` Python:
+
+  ```bash
+  HERMES_HOME=/tmp/hermes-home HERMES_WEBUI_STATE_DIR=/tmp/hermes-state \
+  HERMES_WEBUI_DEFAULT_WORKSPACE=/tmp/hermes-workspace HERMES_WEBUI_PORT=8787 \
+  .venv/bin/python server.py
+  ```
+
+  Health check: `curl http://127.0.0.1:8787/health`. In this agent-free mode the
+  UI, session management, and workspace file browser work; **chat is disabled**
+  because it needs the in-process Hermes Agent plus a configured LLM provider
+  API key (neither is available by default).
