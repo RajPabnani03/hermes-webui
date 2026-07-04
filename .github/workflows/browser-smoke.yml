@@ -8,6 +8,9 @@ name: Browser smoke
 #
 # No secrets, no credentials: the server boots agent-free and the smoke script
 # strips every *_API_KEY from the environment before launch.
+#
+# GitHub-hosted CI runs on the canonical upstream repo only; personal forks
+# without Actions billing skip this job cleanly (see tests.yml header).
 
 on:
   pull_request:
@@ -17,6 +20,7 @@ on:
 
 jobs:
   browser-smoke:
+    if: github.repository == 'nesquena/hermes-webui'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
