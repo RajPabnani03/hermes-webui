@@ -133,3 +133,7 @@ you can run tests/lint directly against those.
   UI, session management, and workspace file browser work; **chat is disabled**
   because it needs the in-process Hermes Agent plus a configured LLM provider
   API key (neither is available by default).
+- **CI on personal forks:** GitHub-hosted workflows are gated to the canonical
+  `nesquena/hermes-webui` repo (where Actions billing lives). Fork-local PRs
+  skip those jobs instead of failing when the fork account has no Actions quota.
+  For full CI signal, open a cross-fork PR to `nesquena/hermes-webui:master`.
