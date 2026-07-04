@@ -141,3 +141,6 @@ you can run tests/lint directly against those.
   `nesquena/hermes-webui` repo (where Actions billing lives). Fork-local PRs
   skip those jobs instead of failing when the fork account has no Actions quota.
   For full CI signal, open a cross-fork PR to `nesquena/hermes-webui:master`.
+  **Note:** a merged fork PR can keep red check rows from commits that ran
+  before this skip gate existed; that history cannot be rewritten — verify
+  `master` (or a new PR) instead.
