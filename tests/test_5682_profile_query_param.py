@@ -196,9 +196,15 @@ def test_profile_switch_runs_before_session_restore():
 def test_profile_regex_matches_upstream_profile_id_re():
     # api/profiles.py uses: r'^[a-z0-9][a-z0-9_-]{0,63}$'
     # The frontend regex must match the same set of names.
-    source = _node_prelude() + """
-const re = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const cases = {
+    # Extract the frontend regex literal from boot.js so the test fails if the
+    # implementation drifts.
+    import re as _re
+    match = _re.search(r"const _PROFILE_ID_RE = /([^/]+)/;", BOOT_JS)
+    assert match, "_PROFILE_ID_RE literal not found in boot.js"
+    pattern = match.group(1)
+    source = _node_prelude() + f"""
+const re = new RegExp({pattern!r});
+const cases = {{
   default: true,
   vops: true,
   artia_2: true,
@@ -211,11 +217,11 @@ const cases = {
   'ARTIA': false,
   'vops!': false,
   '': false,
-};
-const result = {};
-for (const [name, expected] of Object.entries(cases)) {
+}};
+const result = {{}};
+for (const [name, expected] of Object.entries(cases)) {{
   result[name] = re.test(name) === expected;
-}
+}}
 console.log(JSON.stringify(result));
 """
     payload = json.loads(_run_node(source))
