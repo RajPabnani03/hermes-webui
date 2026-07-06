@@ -86,7 +86,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       sw.js                Service worker: offline shell cache, version-pinned assets
     tests/
       conftest.py          Isolated test server/state fixtures
-      ~700 test files      ~7,150 tests collected via pytest (run `pytest --collect-only -q` for exact)
+      ~700 test files      ~11,781 tests collected via `./scripts/test.sh tests/ --collect-only -q` (run for exact current count)
       test_regressions.py  Permanent regression gate
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.

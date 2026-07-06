@@ -4,7 +4,7 @@
 > Use this file to understand architecture, state layers, test harness behavior, and
 > where to look next. Update it when you learn something durable about the repo.
 >
-> **Last verified:** 2026-07-02 against repo `master` (5892 pytest tests collected).
+> **Last verified:** 2026-07-06 against repo `master` (11,781 pytest tests collected via `./scripts/test.sh tests/ --collect-only -q`).
 
 ---
 

@@ -13,11 +13,11 @@ Before making changes, read:
 2. `CONTRIBUTING.md`
 3. `docs/CONTRACTS.md`
 4. `CHANGELOG.md`
-5. `docs/agent-knowledge.md` for the repository map: architecture, state
-   layers, test harness behavior, and investigation checklist
-6. `docs/agent-cheat-sheet.md` for a one-page scannable reference: file
+5. `docs/agent-cheat-sheet.md` for a one-page scannable reference: file
    ownership, quick commands, state layers, critical rules, and contract
    routing by subsystem
+6. `docs/agent-knowledge.md` for the deeper repository map: architecture,
+   state layers, test harness behavior, and investigation checklist
 
 For architecture, testing, or setup work, also read the matching reference:
 
