@@ -5251,6 +5251,11 @@ function syncWorkspaceDisplays(){
     composerChip.disabled=!hasWorkspace;
     composerChip.title=hasWorkspace?ws:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+    composerChip.setAttribute('aria-label', hasWorkspace
+      ? t('workspace_switcher_aria_label', label)
+      : t('workspace_switcher_no_workspace_aria_label'));
+    composerChip.setAttribute('aria-expanded', !!(composerDropdown&&composerDropdown.classList.contains('open'))?'true':'false');
+    composerChip.setAttribute('aria-haspopup', 'true');
   }
   if(mobileAction){
     mobileAction.title=hasWorkspace?ws:t('no_workspace');
@@ -5446,6 +5451,7 @@ function toggleComposerWsDropdown(){
       _positionComposerWsDropdown();
       if(chip) chip.classList.add('active');
       if(mobileAction) mobileAction.classList.add('active');
+      syncWorkspaceDisplays();
     });
   }
 }
@@ -5459,6 +5465,7 @@ function closeWsDropdown(){
   if(composerDd)composerDd.classList.remove('open');
   if(composerChip)composerChip.classList.remove('active');
   if(mobileAction)mobileAction.classList.remove('active');
+  syncWorkspaceDisplays();
 }
 document.addEventListener('click',e=>{
   if(
