@@ -15,11 +15,15 @@ Before making changes, read:
 4. `CHANGELOG.md`
 5. `docs/agent-knowledge.md` for the repository map: architecture, state
    layers, test harness behavior, and investigation checklist
+6. `docs/agent-cheat-sheet.md` for a one-page scannable reference: file
+   ownership, quick commands, state layers, critical rules, and contract
+   routing by subsystem
 
 For architecture, testing, or setup work, also read the matching reference:
 
 - `docs/agent-knowledge.md` for a single onboarding map (start here for
   exploration or pre-integration work)
+- `docs/agent-cheat-sheet.md` for a quick lookup while editing
 - `ARCHITECTURE.md` for design constraints and current module layout
 - `TESTING.md` for local verification commands and manual test guidance
 - `docs/onboarding.md` for first-run onboarding behavior

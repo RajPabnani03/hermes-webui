@@ -1925,8 +1925,8 @@ Bridged CLI sessions:
 
 ---
 
-*Last updated: v0.51.192, May 31, 2026*
-*Total automated tests collected: ~7,150 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
+*Last updated: v0.51.192, May 31, 2026; test count refreshed 2026-07-06.*
+*Total automated tests collected: ~11,781 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
 *Source: <repo>/*

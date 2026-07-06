@@ -8,7 +8,7 @@
 > Keep this document updated as architecture changes are made.
 
 > Current shipped build: `v0.51.192` (May 31, 2026).
-> Automated coverage: ~7,150 tests via `pytest tests/ --collect-only -q`. CI runs on
+> Automated coverage: ~11,781 tests via `./scripts/test.sh tests/ --collect-only -q`. CI runs on
 > Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >

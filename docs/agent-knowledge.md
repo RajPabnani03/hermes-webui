@@ -264,7 +264,7 @@ pytest tests/test_issueXXXX_description.py -v
 pytest tests/ --collect-only -q
 ```
 
-**Current scale:** ~5892 tests across ~546 files (grows with each issue/PR pin).
+**Current scale:** 11,781 tests across ~700 files (grows with each issue/PR pin).
 
 ### 7.2 How tests drive the server
 
