@@ -89,7 +89,11 @@ function _announceNewChatWorkspace(session) {
   const name = (typeof getWorkspaceFriendlyName === 'function')
     ? getWorkspaceFriendlyName(ws)
     : ws;
-  ann.textContent = t('workspace_new_chat_announcement', name);
+  const message = t('workspace_new_chat_announcement', name);
+  // Clear then re-set in a fresh task so screen readers announce repeated
+  // consecutive new chats in the same workspace (the text is identical).
+  ann.textContent = '';
+  requestAnimationFrame(() => { ann.textContent = message; });
 }
 
 async function _restoreRememberedNewChatDraftSession() {

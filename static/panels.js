@@ -5451,6 +5451,7 @@ function toggleComposerWsDropdown(){
       _positionComposerWsDropdown();
       if(chip) chip.classList.add('active');
       if(mobileAction) mobileAction.classList.add('active');
+      syncWorkspaceDisplays();
     });
   }
 }
@@ -5464,6 +5465,7 @@ function closeWsDropdown(){
   if(composerDd)composerDd.classList.remove('open');
   if(composerChip)composerChip.classList.remove('active');
   if(mobileAction)mobileAction.classList.remove('active');
+  syncWorkspaceDisplays();
 }
 document.addEventListener('click',e=>{
   if(

@@ -58,6 +58,21 @@ def test_composer_workspace_chip_has_popup_ar_attributes():
     assert 'aria-hidden="true"' in label.group(0)
 
 
+def test_screen_reader_announcement_live_region_markup():
+    region = re.search(
+        r'<div[^>]*\bid="srAnnouncements"[^>]*>',
+        INDEX_HTML,
+        re.DOTALL,
+    )
+    assert region, "srAnnouncements live region not found in index.html"
+    tag = region.group(0)
+    assert 'aria-live="polite"' in tag
+    assert 'aria-atomic="true"' in tag
+    assert 'position:absolute' in tag
+    assert 'left:-10000px' in tag
+    assert 'overflow:hidden' in tag
+
+
 def test_sync_workspace_displays_updates_chip_accessibility():
     block = _function_block(PANELS_JS, "syncWorkspaceDisplays")
     assert "composerChip.setAttribute('aria-label'" in block
@@ -73,7 +88,10 @@ def test_new_session_announces_resolved_workspace():
 
     helper = _function_block(SESSIONS_JS, "_announceNewChatWorkspace")
     assert "workspace_new_chat_announcement" in helper
-    assert "ann.textContent = t('workspace_new_chat_announcement'" in helper
+    assert "t('workspace_new_chat_announcement', name)" in helper
+    assert "requestAnimationFrame" in helper
+    assert "ann.textContent = '';" in helper
+    assert "ann.textContent = message;" in helper
     assert "getWorkspaceFriendlyName" in helper
 
 
