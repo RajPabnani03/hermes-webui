@@ -138,6 +138,49 @@ async function _finalizeComposerPrefillOnBoot(prefillIntent){
   await _applyComposerPrefillOnBoot(prefillIntent);
 }
 
+// ── URL profile boot helpers ───────────────────────────────────────────────
+// Support ?profile=<id> deep links. The switch is consumed early in the boot
+// IIFE (after auth/profile bootstrap, before session restore) so the target
+// profile's session list and saved session render directly. Invalid names fall
+// back silently and are logged; the param is always stripped via replaceState.
+const _PROFILE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+function _profileNameFromLocation(){
+  if(typeof window==='undefined'||!window.location) return null;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    return qs.get('profile')||null;
+  }catch(_e){return null;}
+}
+function _consumeProfileParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('profile');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
+async function _applyProfileFromLocationOnBoot(){
+  const name=_profileNameFromLocation();
+  if(!name) return;
+  // Strip the param immediately so it is not retained after consumption.
+  _consumeProfileParamFromLocation();
+  if(!_PROFILE_ID_RE.test(name)){
+    console.warn('[hermes] ignoring invalid ?profile=', name);
+    return;
+  }
+  if(!S.activeProfile||name===S.activeProfile) return;
+  if(typeof switchToProfile!=='function') return;
+  try{
+    await switchToProfile(name);
+  }catch(e){
+    console.warn('[hermes] ?profile=', name, 'switch failed:', e);
+  }
+}
+
 // Mobile navigation.
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
@@ -3027,6 +3070,9 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  // URL-driven profile switch must happen before session restore so the saved
+  // session and session list render using the target profile directly.
+  await _applyProfileFromLocationOnBoot();
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
