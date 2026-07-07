@@ -5881,11 +5881,42 @@ async function promptWorkspacePath(){
   }
 }
 
+function _workspaceSwitchHasConversation(){
+  // A session is considered "in conversation" once it has messages or an
+  // in-progress composer draft. Blank/new-chat sessions are safe to rebind.
+  if(!S.session) return false;
+  if(S.busy) return true;
+  if(Array.isArray(S.messages)&&S.messages.length>0) return true;
+  // Treat a non-empty composer as a draft conversation. Prefer the existing
+  // _composerTextWithPendingSelections helper if it exists; otherwise read the
+  // raw textarea (#msg) so the guard doesn't depend on missing helpers.
+  let draft='';
+  if(typeof _composerTextWithPendingSelections==='function'){
+    draft=_composerTextWithPendingSelections();
+  }else{
+    const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+    draft=composer&&composer.value?String(composer.value):'';
+  }
+  if(draft.trim()) return true;
+  return false;
+}
+
 async function switchToWorkspace(path,name){
-  // Opus review Q6: if called from blank page, auto-create a session bound to
-  // the requested workspace so the switch doesn't silently no-op.
+  const targetPath=path||'';
+  const targetName=name||getWorkspaceFriendlyName(targetPath);
+  // Same workspace: refresh UI state without re-binding or prompting.
+  if(S.session&&S.session.workspace===targetPath){
+    closeWsDropdown();
+    syncTopbar();
+    await loadDir('.');
+    if(_currentPanel==='memory') await loadMemory(true);
+    showToast(t('workspace_switched_to',targetName));
+    return;
+  }
+  // Blank page: auto-create a session bound to the requested workspace so the
+  // switch doesn't silently no-op (Opus review Q6). No prompt needed.
   if(!S.session){
-    const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    const ws=targetPath||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
@@ -5909,12 +5940,32 @@ async function switchToWorkspace(path,name){
     if(typeof cancelEditMode==='function')cancelEditMode();
     if(typeof clearPreview==='function')clearPreview();
   }
+  // Mid-conversation switch: confirm whether to start a new chat in the target
+  // workspace or keep the current conversation in its current workspace. The safe
+  // default (cancel) keeps the current chat; confirm starts a new chat bound to
+  // the target workspace (#5473).
+  if(_workspaceSwitchHasConversation()){
+    const startNew=await showConfirmDialog({
+      title:t('workspace_switch_new_chat_title'),
+      message:t('workspace_switch_new_chat_message',targetName),
+      confirmLabel:t('workspace_switch_new_chat_confirm'),
+      cancelLabel:t('workspace_switch_keep_current'),
+      danger:false,
+      focusCancel:true
+    });
+    if(!startNew) return;
+    S._profileSwitchWorkspace=targetPath;
+    closeWsDropdown();
+    await newSession(false,{awaitWorkspaceLoad:true});
+    if(typeof renderSessionList==='function') await renderSessionList();
+    return;
+  }
   try{
     closeWsDropdown();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
+      session_id:S.session.session_id, workspace:targetPath, model:S.session.model, model_provider:S.session.model_provider||null
     })});
-    S.session.workspace=path;
+    S.session.workspace=targetPath;
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -5922,7 +5973,7 @@ async function switchToWorkspace(path,name){
     syncTopbar();
     await loadDir('.');
     if (_currentPanel === 'memory') await loadMemory(true);
-    showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
+    showToast(t('workspace_switched_to',targetName));
   }catch(e){setStatus(t('switch_failed')+e.message);}
 }
 

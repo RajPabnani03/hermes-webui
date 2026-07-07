@@ -101,7 +101,11 @@ HERMES_WEBUI_PORT=8787 \
 | R8 | No tracebacks in API 500 responses |
 | R9 | Approvals iterate `pattern_keys` (plural), not legacy singular only |
 
----
+## UX behavior contracts
+
+| Flow | File | Behavior |
+|------|------|----------|
+| Workspace switch mid-conversation | `static/panels.js` `switchToWorkspace()` | If the session has messages or a composer draft, show a confirmation dialog: **Keep current chat** (cancel/safe default) or **Start new chat** (confirm). Confirming calls `newSession()` with the target workspace via `S._profileSwitchWorkspace`. Same-workspace selection is a no-op refresh. Blank page auto-creates a session bound to the target workspace without prompting. Busy/dirty guards run before any dialog. |
 
 ## Contract routing by subsystem
 
@@ -166,4 +170,4 @@ UI/UX changes need before/after evidence and responsive-state coverage. Release-
 
 ---
 
-*Last verified: 2026-07-06 against repo `master` — 11,781 tests collected via `./scripts/test.sh tests/ --collect-only -q`.*
+*Last verified: 2026-07-07 against repo `master` — 11,806 tests collected via `./scripts/test.sh tests/ --collect-only -q`.*
