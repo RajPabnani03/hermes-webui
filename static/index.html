@@ -1150,6 +1150,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSkipSessionDeleteConfirm" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_skip_session_delete_confirm">Skip session delete confirmation</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_skip_session_delete_confirm">Delete plain conversations without a confirmation dialog. Worktree-backed sessions still confirm to avoid accidental on-disk data loss.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsVirtualizeTranscript" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_virtualize_transcript">Virtualize long transcripts (experimental)</span>
               </label>

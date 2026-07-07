@@ -827,6 +827,8 @@ const LOCALES = {
     settings_desc_conversation_outline: 'Show a desktop-only jump list for user questions in the current conversation. Off by default.',
     settings_label_hide_suggestions: 'Hide new-chat suggestions',
     settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
+    settings_label_skip_session_delete_confirm: 'Skip session delete confirmation',
+    settings_desc_skip_session_delete_confirm: 'Delete plain conversations without a confirmation dialog. Worktree-backed sessions still confirm to avoid accidental on-disk data loss.',
     settings_label_virtualize_transcript: 'Virtualize long transcripts (experimental)',
     settings_desc_virtualize_transcript: "Experimental. Renders only the visible portion of very long chat transcripts (over 80 messages) to speed up scrolling. Off by default because it can cause scroll flicker on long sessions with large tool-call blocks. Turn it on to try it; leave it off for the full transcript to render at once (and so the browser's Find (Ctrl+F) matches the whole conversation).",
     settings_label_token_usage: 'Show token usage',

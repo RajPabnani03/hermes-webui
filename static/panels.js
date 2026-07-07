@@ -7901,6 +7901,8 @@ function _preferencesPayloadFromUi(){
   if(showConversationOutlineCb) payload.show_conversation_outline=showConversationOutlineCb.checked;
   const hideSuggestionsCb=$('settingsHideSuggestions');
   if(hideSuggestionsCb) payload.hide_empty_state_suggestions=hideSuggestionsCb.checked;
+  const skipDeleteConfirmCb=$('settingsSkipSessionDeleteConfirm');
+  if(skipDeleteConfirmCb) payload.skip_session_delete_confirm=skipDeleteConfirmCb.checked;
   const virtualizeTranscriptCb=$('settingsVirtualizeTranscript');
   if(virtualizeTranscriptCb){
     payload.virtualize_transcript=virtualizeTranscriptCb.checked;
@@ -8393,6 +8395,15 @@ async function loadSettingsPanel(){
       hideSuggestionsCb.addEventListener('change',()=>{
         window._hideEmptyStateSuggestions=hideSuggestionsCb.checked;
         if(typeof applyEmptyStateSuggestionPref==='function') applyEmptyStateSuggestionPref();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
+    const skipDeleteConfirmCb=$('settingsSkipSessionDeleteConfirm');
+    if(skipDeleteConfirmCb){
+      skipDeleteConfirmCb.checked=settings.skip_session_delete_confirm===true;
+      try{localStorage.setItem('hermes-skip-delete-confirm',skipDeleteConfirmCb.checked?'1':'0');}catch(_){}
+      skipDeleteConfirmCb.addEventListener('change',()=>{
+        try{localStorage.setItem('hermes-skip-delete-confirm',skipDeleteConfirmCb.checked?'1':'0');}catch(_){}
         _schedulePreferencesAutosave();
       },{once:false});
     }
