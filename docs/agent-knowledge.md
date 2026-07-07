@@ -4,7 +4,7 @@
 > Use this file to understand architecture, state layers, test harness behavior, and
 > where to look next. Update it when you learn something durable about the repo.
 >
-> **Last verified:** 2026-07-06 against repo `master` (11,781 pytest tests collected via `./scripts/test.sh tests/ --collect-only -q`).
+> **Last verified:** 2026-07-07 against repo `master` (11,806 pytest tests collected via `./scripts/test.sh tests/ --collect-only -q`).
 
 ---
 
@@ -264,7 +264,7 @@ pytest tests/test_issueXXXX_description.py -v
 pytest tests/ --collect-only -q
 ```
 
-**Current scale:** 11,781 tests across ~700 files (grows with each issue/PR pin).
+**Current scale:** 11,806 tests across ~700 files (grows with each issue/PR pin).
 
 ### 7.2 How tests drive the server
 
