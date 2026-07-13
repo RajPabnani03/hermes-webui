@@ -17,6 +17,7 @@ const COMMANDS=[
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
+  {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
   {name:'goal',      desc:t('cmd_goal'),     fn:cmdGoal,      arg:'[status|pause|resume|clear|text]', subArgs:['status','pause','resume','clear']},
   {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
@@ -47,6 +48,127 @@ function parseCommand(text){
   return {name,args};
 }
 
+const DESKTOP_COMPANION_EXTENSION_ID='desktop-companion';
+const DESKTOP_COMPANION_NAME='Desktop Companion';
+const DESKTOP_COMPANION_INSTALL_PATH='Settings -> Extensions -> Gallery -> Desktop Companion';
+const DESKTOP_COMPANION_SETUP_GUIDE_URL='https://github.com/franksong2702/hermes-webui-desktop-companion#after-gallery-install';
+const DESKTOP_COMPANION_LOCAL_APP_LABEL='Desktop Companion app';
+
+function _getDesktopCompanionStatusGlobal(){
+  if(typeof window==='undefined') return null;
+  return window.__HERMES_WEBUI_DESKTOP_COMPANION_STATUS__||null;
+}
+
+function _getDesktopCompanionExtensionStatus(status){
+  return Array.isArray(status&&status.extensions)
+    ? status.extensions.find(ext=>String(ext&&ext.id||'')===DESKTOP_COMPANION_EXTENSION_ID)||null
+    : null;
+}
+
+function _petSlashCommandArgs(rawCommandText){
+  const parsed=parseCommand(String(rawCommandText||'').trim());
+  return parsed&&parsed.name==='pet' ? parsed.args : String(rawCommandText||'').trim().replace(/^\/pet\b\s*/i,'').trim();
+}
+
+function _desktopCompanionMissingMessage(){
+  return `${DESKTOP_COMPANION_NAME} is not installed yet.
+
+Install it from ${DESKTOP_COMPANION_INSTALL_PATH}, then follow the setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}.
+
+The guide also shows how to start the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}.`;
+}
+
+function _desktopCompanionDisabledMessage(){
+  return `${DESKTOP_COMPANION_NAME} is installed but disabled.
+
+Enable it in Settings -> Extensions, then reload WebUI if you just changed that and start the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}.
+
+Setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}`;
+}
+
+function _desktopCompanionReloadMessage(){
+  return `${DESKTOP_COMPANION_NAME} is enabled, but the adapter status is not loaded yet.
+
+Reload WebUI if you just enabled it, then start the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}.`;
+}
+
+function _desktopCompanionConnectMessage(){
+  return `${DESKTOP_COMPANION_NAME} is enabled, but the local app is not connected yet.
+
+Start or connect the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}, then retry /pet.
+
+Setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}`;
+}
+
+function _desktopCompanionStatusUnavailableMessage(){
+  return `${DESKTOP_COMPANION_NAME} status is unavailable right now.
+
+Reload WebUI or check your connection, then retry /pet.`;
+}
+
+function _desktopCompanionUnavailableMessage(){
+  return `${DESKTOP_COMPANION_NAME} is installed and connected, but /pet is not available yet in this Desktop Companion version.
+
+Update the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}, then follow the setup guide: ${DESKTOP_COMPANION_SETUP_GUIDE_URL}.`;
+}
+
+function _desktopCompanionHookErrorMessage(){
+  return `${DESKTOP_COMPANION_NAME} is installed and connected, but it hit an error while handling /pet.
+
+Check the browser console and the ${DESKTOP_COMPANION_LOCAL_APP_LABEL}, then retry /pet.`;
+}
+
+async function handlePetSlashCommand(rawCommandText,meta){
+  const command=String(rawCommandText||'');
+  const commandName=String((meta&&meta.name)||'pet').trim()||'pet';
+  const args=_petSlashCommandArgs(command);
+  let status;
+  try{
+    status=await api('/api/extensions/status');
+  }catch(_e){
+    return {handled:false,message:_desktopCompanionStatusUnavailableMessage()};
+  }
+  const companion=_getDesktopCompanionExtensionStatus(status);
+  if(!companion){
+    return {handled:false,message:_desktopCompanionMissingMessage()};
+  }
+  if(companion.effective_enabled!==true){
+    return {handled:false,message:_desktopCompanionDisabledMessage()};
+  }
+  const companionStatus=_getDesktopCompanionStatusGlobal();
+  if(!companionStatus){
+    return {handled:false,message:_desktopCompanionReloadMessage()};
+  }
+  if(companionStatus.connected!==true){
+    return {handled:false,message:_desktopCompanionConnectMessage()};
+  }
+  const hook=typeof window!=='undefined'&&window.__hermesHandlePetSlashCommand;
+  if(typeof hook==='function'){
+    try{
+      const result=await hook({
+        command,
+        args,
+        source:'webui-slash-command',
+        metadata:{name:commandName},
+      });
+      if(result){
+        return {
+          handled:true,
+          message:result&&typeof result==='object'&&'message' in result
+            ? String(result.message??'')
+            : '',
+        };
+      }
+    }catch(_e){
+      if(typeof console!=='undefined'&&console.error){
+        console.error('[hermes] Desktop Companion /pet hook error:',_e);
+      }
+      return {handled:false,message:_desktopCompanionHookErrorMessage()};
+    }
+  }
+  return {handled:false,message:_desktopCompanionUnavailableMessage()};
+}
+
 function executeCommand(text){
   const parsed=parseCommand(text);
   if(!parsed)return null;
@@ -64,6 +186,7 @@ function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
+  const reserved=_getReservedSlashCommandSlugs();
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
     if(!name.startsWith(q)||seen.has(name))continue;
     matches.push({
@@ -74,16 +197,22 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  for(const skill of _skillCommandCache){
-    if(!skill.name.startsWith(q)||seen.has(skill.name))continue;
-    matches.push(skill);
-    seen.add(skill.name);
+  if('pet'.startsWith(q)&&!seen.has('pet')){
+    const petMeta=Array.isArray(_agentCommandCache)
+      ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
+      : null;
+    matches.push({
+      name:'pet',
+      desc:String((petMeta&&petMeta.description)||'Desktop Companion command').trim()||'Desktop Companion command',
+      source:'agent',
+    });
+    seen.add('pet');
   }
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
     if(!name.startsWith(q)||seen.has(name))continue;
-    if(cmd.cli_only)continue;
+    if(cmd.cli_only&&name!=='pet')continue;
     matches.push({
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
@@ -91,13 +220,31 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
+  if(_agentCommandCacheReady){
+    for(const bundle of _bundleCommandCache){
+      if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+      matches.push(bundle);
+      seen.add(bundle.name);
+    }
+  }
+  for(const skill of _skillCommandCache){
+    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
+    matches.push(skill);
+    seen.add(skill.name);
+  }
   return matches;
 }
 
+let _forcedSkillDirectivePending=null;
 let _slashModelCache=null;
 let _slashModelCachePromise=null;
 let _slashPersonalityCache=null;
 let _slashPersonalityCachePromise=null;
+let _bundleCommandCache=[];
+let _bundleCommandLoadPromise=null;
+let _bundleCommandCacheReady=false;
+let _slashSkillCache=null;
+let _slashSkillCachePromise=null;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
@@ -115,6 +262,7 @@ function _invalidateSlashModelCache(){
 // define a window global — see tests/test_cli_only_slash_commands.py.
 if(typeof window!=='undefined'){
   window._invalidateSlashModelCache=_invalidateSlashModelCache;
+  window.invalidateSlashSkillCaches=invalidateSlashSkillCaches;
 }
 
 function _normalizeSlashSubArg(value){
@@ -196,10 +344,43 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+async function _loadSlashSkillSubArgs(force=false){
+  if(_slashSkillCache&&!force) return _slashSkillCache;
+  if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  _slashSkillCachePromise=(async()=>{
+    try{
+      const data=await api('/api/skills');
+      const values=[];
+      for(const skill of (data&&data.skills)||[]){
+        const name=_normalizeSlashSubArg(skill&&skill.name);
+        if(name) values.push(name);
+      }
+      const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      _slashSkillCache=deduped;
+      return deduped;
+    }catch(_){
+      _slashSkillCache=null;
+      return [];
+    }finally{
+      _slashSkillCachePromise=null;
+    }
+  })();
+  return _slashSkillCachePromise;
+}
+
+function invalidateSlashSkillCaches(){
+  _slashSkillCache=null;
+  _slashSkillCachePromise=null;
+  _skillCommandCache=[];
+  _skillCommandCacheReady=false;
+  _skillCommandLoadPromise=null;
+}
+
 function _getSlashSubArgOptions(spec){
   if(Array.isArray(spec)) return Promise.resolve(spec.slice());
   if(spec==='models') return _loadSlashModelSubArgs();
   if(spec==='personalities') return _loadSlashPersonalitySubArgs();
+  if(spec==='skills') return _loadSlashSkillSubArgs();
   return Promise.resolve([]);
 }
 
@@ -243,7 +424,15 @@ function cliOnlyCommandResponse(cmdName, meta){
   return `\`/${name}\` is a Hermes CLI-only command and cannot run inside the WebUI.${detail}${extra}`;
 }
 
+async function executeAgentCommand(text,_meta){
+  return _runAgentCommandTransport(text,_meta);
+}
+
 async function executeAgentPluginCommand(text,_meta){
+  return _runAgentCommandTransport(text,_meta);
+}
+
+async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
   const data=await api('/api/commands/exec',{
@@ -253,9 +442,41 @@ async function executeAgentPluginCommand(text,_meta){
   return String(data&&data.output||'(no output)');
 }
 
+async function resolveBundleCommand(text,_meta){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  return api('/api/commands/bundles/resolve',{
+    method:'POST',
+    body:JSON.stringify({command})
+  });
+}
+
+function _activeSlashCommandOffset(text){
+  // Find the offset of the slash that begins the active command token.
+  // A command token starts with / at the beginning of the line or after
+  // whitespace.  Excludes ~/ path tokens and mid-word slashes (URLs,
+  // provider/model IDs like openrouter/deepseek).
+  if(!text||text.indexOf('\n')!==-1) return -1;
+  // Scan for / at a token-initial position
+  for(let i=0;i<text.length;i++){
+    if(text[i]==='/'){
+      // Start of line = token-initial
+      if(i===0) return i;
+      // After whitespace = token-initial
+      if(/\s/.test(text[i-1])){
+        // Exclude ~/ path tokens
+        if(i+1<text.length&&text[i+1]==='~') continue;
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
 function _parseSlashAutocomplete(text){
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1) return null;
-  const raw=text.slice(1);
+  const slashIdx=_activeSlashCommandOffset(text);
+  if(slashIdx<0) return null;
+  const raw=text.slice(slashIdx+1);
   const hasSpace=/\s/.test(raw);
   const parts=raw.split(/\s+/);
   const cmdName=(parts[0]||'').toLowerCase();
@@ -281,6 +502,38 @@ async function getSlashAutocompleteMatches(text){
       desc:parsed.command.desc,
       source:'subarg',
       parent:parsed.command.name,
+    }));
+}
+
+function _findComposerPathToken(text,cursor){
+  const value=String(text||'');
+  const rawCursor=Number(cursor);
+  const pos=Number.isFinite(rawCursor)?Math.max(0,Math.min(rawCursor,value.length)):value.length;
+  let start=pos;
+  while(start>0&&!/\s/.test(value.charAt(start-1))) start-=1;
+  let end=pos;
+  while(end<value.length&&!/\s/.test(value.charAt(end))) end+=1;
+  const prefix=value.slice(start,pos);
+  if(!prefix.startsWith('~/')) return null;
+  return {start,end,prefix};
+}
+
+async function getComposerPathAutocompleteMatches(text,cursor){
+  const token=_findComposerPathToken(text,cursor);
+  if(!token||typeof api!=='function') return [];
+  const qs=new URLSearchParams({prefix:token.prefix}).toString();
+  const data=await api(`/api/workspaces/suggest?${qs}`);
+  const needle=token.prefix.toLowerCase();
+  return ((data&&data.suggestions)||[])
+    .map(path=>String(path||''))
+    .filter(path=>path&&path.toLowerCase().startsWith(needle))
+    .map(path=>({
+      name:path,
+      value:path,
+      desc:'Workspace path',
+      source:'path',
+      tokenStart:token.start,
+      tokenEnd:token.end,
     }));
 }
 
@@ -322,18 +575,114 @@ function cmdClear(){
   showToast(t('conversation_cleared'));
 }
 
+// Find the best matching model <option> for a slash-command query.
+// Returns an exact id/label match if present, otherwise the shortest option
+// whose value or label contains the query. Preferring the shortest match keeps
+// a specific query like "mimo-v2.5" from being shadowed by a longer variant
+// such as "mimo-v2.5-pro". See issue #3368.
+//
+// #3368 follow-up: a COMPLETE versioned query (ends in a digit, e.g.
+// "mimo-v2.5") must not match a variant/tier suffix (e.g. "mimo-v2.5-pro") via
+// substring — that silently upgrades the user to a different (paid) tier they
+// did not ask for. Such a candidate is only accepted when the query also
+// matches the option's visible label as a *whole word*, or when the extra text
+// continues a version number. Otherwise the longer tier is rejected here and
+// surfaced as a suggestion instead.
+function _looksLikeVersionedModel(query){
+  // e.g. "mimo-v2.5", "gpt-5.5", "claude-opus-4.6" — ends in a digit.
+  return /\d$/.test(String(query||''));
+}
+// Build the full /model candidate set from the catalog groups returned by
+// /api/models: featured `models` PLUS the truncated `extra_models` tail. Large
+// provider catalogs (e.g. a Nous Portal subscription with >25 models) only
+// render a "featured" subset as <option> entries — the rest live in
+// extra_models and never become <select> options (see _build_nous_featured_set
+// in api/config.py). The slash command exists precisely so power users can reach
+// ANY catalog model by name, the same way the CLI/autocomplete can, so /model
+// must resolve against this full list — not just the rendered picker options.
+// Falls back to the live <select> options when the catalog fetch failed.
+// Each entry mimics the <option> shape (value + textContent) so it can be passed
+// straight to _bestModelMatch / _nearestModelSuggestion. Also returns a
+// value->provider_id map so an extras-only winner can be injected with the right
+// provider. (#3368)
+function _buildModelCandidates(sel,groups){
+  const options=[];
+  const providerMap={};
+  if(Array.isArray(groups)&&groups.length){
+    for(const g of groups){
+      const pid=(g&&g.provider_id)||'';
+      const push=m=>{
+        if(!m||!m.id) return;
+        options.push({value:m.id,textContent:m.label||m.id});
+        if(pid&&!(m.id in providerMap)) providerMap[m.id]=pid;
+      };
+      for(const m of (Array.isArray(g.models)?g.models:[])) push(m);
+      for(const m of (Array.isArray(g.extra_models)?g.extra_models:[])) push(m);
+    }
+  }
+  if(!options.length&&sel){
+    for(const o of Array.from(sel.options||[])) options.push({value:o.value,textContent:o.textContent});
+  }
+  return {options,providerMap};
+}
+function _bestModelMatch(options,query){
+  let best=null;
+  const versioned=_looksLikeVersionedModel(query);
+  for(const opt of options){
+    const value=opt.value.toLowerCase();
+    const text=opt.textContent.toLowerCase();
+    if(value===query||text===query) return opt.value;
+    if(value.includes(query)||text.includes(query)){
+      if(versioned){
+        // Reject a longer variant where the query is immediately followed by a
+        // tier/variant suffix ("-pro", "-flash", " pro", etc.) rather than a
+        // version continuation. Tested on the option value (canonical id).
+        const idx=value.indexOf(query);
+        const after=idx>=0?value.charAt(idx+query.length):'';
+        // after === '' → query is a suffix of value (exact-ish, allow)
+        // after is a digit or '.' → version continuation (allow, e.g. v2 → v2.5)
+        // after is '-' or other → variant/tier suffix (reject)
+        if(after && after!=='.' && !/\d/.test(after)) continue;
+      }
+      if(best===null||opt.value.length<best.length) best=opt.value;
+    }
+  }
+  return best;
+}
+
+// When a versioned query has no clean match, find the closest catalog option
+// (a longer variant that the query is a prefix of) to offer as a suggestion,
+// e.g. "mimo-v2.5" → "mimo-v2.5-pro". Returns the suggested option value, or ''.
+function _nearestModelSuggestion(options,query){
+  let suggestion='';
+  for(const opt of options){
+    const value=opt.value.toLowerCase();
+    if(value.includes(query)){
+      const cand=opt.value;
+      if(!suggestion||cand.length<suggestion.length) suggestion=cand;
+    }
+  }
+  return suggestion;
+}
+
 async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
   if(!sel)return;
   let q=args.toLowerCase();
-  // Resolve alias before fuzzy matching the dropdown.
-  // Fetch /api/models which now includes an "aliases" key.
+  // Fetch /api/models once: it carries both the alias map AND the full catalog
+  // groups (featured `models` + truncated `extra_models`). Resolve aliases, then
+  // build the full candidate set so /model can reach ANY catalog model by name —
+  // not just the subset rendered as <option> entries. On large provider catalogs
+  // (e.g. a Nous Portal subscription) the picker only renders ~25 "featured"
+  // models; the rest live in extra_models and are absent from sel.options. The
+  // CLI resolves against the full catalog, so /model must too. (#3368)
+  let modelsData=null;
   try {
-    const resp=await fetch('/api/models');
+    const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
     if(resp.ok){
-      const data=await resp.json();
-      const aliases=data.aliases||{};
+      modelsData=await resp.json();
+      const aliases=modelsData.aliases||{};
       for(const [alias,modelId] of Object.entries(aliases)){
         if(alias.toLowerCase()===q){
           q=modelId.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
@@ -342,33 +691,35 @@ async function cmdModel(args){
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
+  const {options:candidates,providerMap}=_buildModelCandidates(sel,modelsData&&modelsData.groups);
   // First: try exact match within active provider's optgroup.
   // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
   const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
   let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
-  // Fallback: fuzzy match across all options
+  // Fallback: fuzzy match across the FULL catalog (featured + extras), so an
+  // exact bare model living in the extras tail (e.g. "mimo-v2.5" alongside the
+  // featured "mimo-v2.5-pro") still wins — exact/shortest-match in _bestModelMatch.
   if(!match){
-    for(const opt of sel.options){
-      if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
-        match=opt.value;break;
-      }
-    }
+    match=_bestModelMatch(candidates,q);
   }
   // Fallback: if q has provider/ prefix (e.g. "deepseek/deepseek-v4-flash"),
   // try the bare model name (which is how options appear for the active provider)
   if(!match && q.includes('/')){
     const bare=q.slice(q.lastIndexOf('/')+1);
-    for(const opt of sel.options){
-      if(opt.value.toLowerCase().includes(bare)||opt.textContent.toLowerCase().includes(bare)){
-        match=opt.value;break;
-      }
-    }
+    match=_bestModelMatch(candidates,bare);
+    // #3368: a versioned slash-qualified query whose only near catalog entry is a
+    // rejected tier variant (e.g. "xiaomi/mimo-v2.5" when only "xiaomi/mimo-v2.5-pro"
+    // exists) must NOT silently direct-update to the invalid name — fall through to
+    // the no-match/"did you mean?" toast instead. The cross-provider direct-update
+    // path below is only for genuinely off-catalog providers with no near variant.
+    const nearSuggestion=_nearestModelSuggestion(candidates,q)||_nearestModelSuggestion(candidates,bare);
+    const versionedNoSnap=_looksLikeVersionedModel(bare)&&nearSuggestion;
     // Cross-provider fallback: if still no match, the model is from a
     // different provider not in the dropdown. Call /api/session/update directly.
-    if(!match && S&&S.session&&S.session.session_id){
+    if(!match && !versionedNoSnap && S&&S.session&&S.session.session_id){
       const provider=q.slice(0,q.indexOf('/'));
       try{
-        const resp=await fetch('/api/session/update',{
+        const resp=await fetch(new URL('api/session/update',document.baseURI||location.href).href,{
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
@@ -387,8 +738,32 @@ async function cmdModel(args){
       }catch(_){/* fall through to "no model match" */}
     }
   }
-  if(!match){showToast(t('no_model_match')+`"${args}"`);return;}
-  sel.value=match;
+  if(!match){
+    // #3368: when a complete versioned name (e.g. "mimo-v2.5") doesn't match
+    // because only a longer tier variant exists ("mimo-v2.5-pro"), don't snap
+    // to it — say no-match and suggest the near variant so the user can opt in.
+    // no_model_match already ends with an opening quote, so close it with args+".
+    let msg=t('no_model_match')+`${args}"`;
+    const suggestion=_nearestModelSuggestion(candidates,q);
+    if(suggestion){
+      // model_did_you_mean is a placeholder template; t() invokes it with the
+      // suggestion as its arg. (Calling t() without the arg renders "undefined".)
+      msg+=t('model_did_you_mean', suggestion);
+    }
+    showToast(msg);
+    return;
+  }
+  // The winning model may live in the extras tail (not a rendered <option>), so
+  // a bare `sel.value=match` would silently no-op. Inject the option with its
+  // provider before selecting so onchange() persists the correct model+provider
+  // end-to-end. _ensureModelOptionInDropdown reuses the existing option when one
+  // is already rendered. (#3368)
+  const hasOption=Array.from(sel.options||[]).some(o=>o.value===match);
+  if(!hasOption && typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(match,sel,providerMap[match]||null);
+  }else{
+    sel.value=match;
+  }
   await sel.onchange();
   showToast(t('switched_to')+match);
 }
@@ -408,13 +783,23 @@ async function cmdWorkspace(args){
 }
 
 async function cmdTerminal(){
+  let data=null;
+  try{
+    data=await api('/api/workspaces');
+    if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
+    if(data&&data.terminal_remote_backend){
+      const msg=typeof _terminalRemoteBackendUnsupportedMessage==='function'
+        ? _terminalRemoteBackendUnsupportedMessage()
+        : 'Embedded terminal is only supported for local terminal backends.';
+      showToast(msg,3200,'warning');
+      if(typeof syncTerminalButton==='function') syncTerminalButton();
+      return;
+    }
+  }catch(_){}
   if(!S.session&&typeof newSession==='function'){
     if(!S._profileSwitchWorkspace&&!S._profileDefaultWorkspace){
-      try{
-        const data=await api('/api/workspaces');
-        const first=(data.workspaces||[])[0];
-        S._profileSwitchWorkspace=data.last||(first&&first.path)||null;
-      }catch(_){}
+      const first=(data&&data.workspaces||[])[0];
+      S._profileSwitchWorkspace=(data&&data.last)||(first&&first.path)||null;
     }
     await newSession();
     if(typeof renderSessionList==='function') await renderSessionList();
@@ -664,7 +1049,7 @@ async function cmdUsage(){
 
 async function cmdTheme(args){
   const themes=['system','dark','light'];
-  const skins=(_SKINS||[]).map(s=>s.name.toLowerCase());
+  const skins=(_SKINS||[]).map(s=>(s.value||s.name).toLowerCase());
   const legacyThemes=Object.keys(_LEGACY_THEME_MAP||{});
   const val=(args||'').toLowerCase().trim();
   // Check if it's a theme
@@ -750,6 +1135,47 @@ async function cmdSkills(args){
   }
 }
 
+async function cmdUse(args){
+  if(!args){
+    S.messages.push({role:'assistant',content:'Usage: `/use <skill-name>` — forces the agent to consult that skill before its next response.'});
+    renderMessages();
+    return;
+  }
+  let resolve;
+  const pending = {sessionId:S.session&&S.session.session_id||null,promise:null};
+  pending.promise = new Promise(r => { resolve = r; });
+  _forcedSkillDirectivePending = pending;
+  const isCurrentSession = () => !pending.sessionId || (S.session&&S.session.session_id)===pending.sessionId;
+  try{
+    const data = await api('/api/skills');
+    const skills = data.skills || [];
+    const match = skills.find(s => (s.name||'').toLowerCase() === args.toLowerCase());
+    if(!match){
+      resolve(null);
+      if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+      if(isCurrentSession()){
+        const msg = {role:'assistant', content:`No skill named \`${args}\`. Use \`/skills\` to see available skills.`};
+        S.messages.push(msg); renderMessages();
+      }
+      return;
+    }
+    const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}`);
+    const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
+    if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+    const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
+    resolve({name:match.name,directive,content:skillContent});
+    if(isCurrentSession()){
+      S.messages.push({role:'assistant', content:`Next turn: skill \`${match.name}\` will be forced.`});
+      renderMessages();
+    }
+    showToast(`Skill \`${match.name}\` will be used for next turn.`);
+  }catch(e){
+    resolve(null);
+    if(_forcedSkillDirectivePending===pending)_forcedSkillDirectivePending = null;
+    showToast('Failed to load skills: '+e.message);
+  }
+}
+
 async function cmdPersonality(args){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!args){
@@ -785,7 +1211,7 @@ async function cmdPersonality(args){
 async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){showToast(t('no_active_task'));return;}
-  if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
+  if(typeof cancelStream==='function'){await cancelStream('slash-stop');showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
 }
 
@@ -847,12 +1273,12 @@ async function cmdGoal(args){
 }
 
 // ── Busy-input mode commands ──────────────────────────────────────────────
-// These commands let users override the default busy_input_mode setting for a
+// These commands let users override the default message mode setting for a
 // specific message.  They are only meaningful while the agent is running.
 
 /**
  * /queue <message> — Explicitly queue a message for the next turn.
- * Works regardless of the busy_input_mode setting.
+ * Works regardless of the default message mode setting.
  */
 async function cmdQueue(args){
   const msg=(args||'').trim();
@@ -891,7 +1317,7 @@ async function cmdInterrupt(args){
   updateQueueBadge(S.session.session_id);
   S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
-  if(typeof cancelStream==='function'){await cancelStream();}
+  if(typeof cancelStream==='function'){await cancelStream('slash-interrupt');}
   showToast(t('cmd_interrupt_confirm'),2000);
 }
 
@@ -903,8 +1329,10 @@ async function cmdInterrupt(args){
  * steer text to the next tool-result message so the model sees it on its
  * next iteration — same pathway as the CLI's /steer command.
  *
- * Falls back to interrupt mode when the agent isn't running, isn't cached,
- * or doesn't support steer (older hermes-agent versions).
+ * Leaves the active stream alone when the agent isn't running, isn't cached,
+ * or doesn't support steer (older hermes-agent versions). The failed steer text
+ * is restored to the composer so the user can choose Queue or Interrupt
+ * explicitly instead of WebUI silently cancelling the current run.
  */
 async function cmdSteer(args){
   const msg=(args||'').trim();
@@ -920,17 +1348,12 @@ async function cmdSteer(args){
   await _trySteer(msg, /*explicitSteer=*/true);
 }
 
-/**
- * Shared implementation for /steer and the busy_input_mode='steer' path.
- *
- * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) falls back to interrupt+queue:
- * queues the message and cancels the stream so the drain re-sends it.
- *
- * @param {string} msg - The steer text.
- * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
- *   (vs the busy-mode auto-fallback). Affects toast wording only.
- */
+function _steerFailureMessageKey(fallback) {
+  const key = 'steer_fail_' + (fallback || 'unknown');
+  return (typeof LOCALES !== 'undefined' && LOCALES.en && LOCALES.en[key])
+    ? key : 'steer_fail_unknown';
+}
+
 function _showSteerIndicator(text){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
@@ -951,6 +1374,49 @@ function _showSteerIndicator(text){
   if(typeof scrollToBottom==='function') scrollToBottom();
 }
 
+function _showSteerRecovery(msg, explicitSteer, fallback) {
+  const inner = document.getElementById('msgInner');
+  if (!inner) return;
+  const old = inner.querySelector('.steer-recovery');
+  if (old) old.remove();
+  const el = document.createElement('div');
+  el.className = 'steer-recovery';
+  const label = document.createElement('span');
+  label.className = 'steer-recovery-label';
+  label.textContent = t(_steerFailureMessageKey(fallback));
+  el.appendChild(label);
+  const retryBtn = document.createElement('button');
+  retryBtn.className = 'steer-recovery-retry';
+  retryBtn.textContent = t('steer_recovery_retry');
+  retryBtn.addEventListener('click', () => {
+    el.remove();
+    void _trySteer(msg, explicitSteer).catch(console.error);
+  });
+  el.appendChild(retryBtn);
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'steer-recovery-dismiss';
+  dismissBtn.textContent = t('steer_recovery_dismiss');
+  dismissBtn.addEventListener('click', () => el.remove());
+  el.appendChild(dismissBtn);
+  inner.appendChild(el);
+  if (typeof scrollToBottom === 'function') scrollToBottom();
+}
+
+/**
+ * Shared implementation for /steer and the default_message_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) it restores the draft and keeps
+ * the active stream running. Steer belongs to the active run; a failed Steer
+ * must not be silently upgraded into Queue, Interrupt, or Stop-and-send.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects draft restore prefix only;
+ *   toast wording is determined by the failure reason code.
+ * @returns {Promise<boolean>} true when the steer was delivered, false when the
+ *   draft was restored and the active stream was left untouched.
+ */
 async function _trySteer(msg, explicitSteer){
   let result=null;
   try{
@@ -959,7 +1425,7 @@ async function _trySteer(msg, explicitSteer){
       body:JSON.stringify({session_id:S.session.session_id,text:msg}),
     });
   }catch(e){
-    // Network or server error — fall back to interrupt
+    // Network or server error — keep the active stream running and restore the draft.
     result={accepted:false, fallback:'network_error'};
   }
   if(result&&result.accepted){
@@ -969,26 +1435,21 @@ async function _trySteer(msg, explicitSteer){
     // all call renderMessages which rebuilds msgInner).
     _showSteerIndicator(msg);
     showToast(t('cmd_steer_delivered'),2500);
-    return;
+    return true;
   }
-  // Fall back to interrupt: queue the message + cancel the stream so the
-  // drain in setBusy(false) re-sends it as a fresh turn.
-  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-  updateQueueBadge(S.session.session_id);
-  S.pendingFiles=[];renderTray();
-  if(typeof cancelStream==='function'){await cancelStream();}
-  // Toast wording differs based on why we're falling back so the user
-  // understands what just happened.
-  const reason=(result&&result.fallback)||'unknown';
-  if(explicitSteer){
-    showToast(t('cmd_steer_fallback'),2500);
-  } else if(reason==='no_cached_agent'||reason==='not_running'||reason==='stream_dead'){
-    // Busy mode hit the steer path before the agent was ready —
-    // interrupt is the natural fallback, no need to call out steer.
-    showToast(t('busy_interrupt_confirm'),2000);
-  } else {
-    showToast(t('busy_steer_fallback'),2500);
+  // Do not fall back to interrupt: Steer failure is not permission to cancel
+  // the active run. Restore the draft so the user can explicitly Queue or
+  // Interrupt if that is what they want next. Pending files remain staged.
+  const inp=$('msg');
+  if(inp){
+    inp.value=explicitSteer?`/steer ${msg}`:msg;
+    if(typeof autoResize==='function')autoResize();
   }
+  if(typeof renderTray==='function')renderTray();
+  const fallbackCode = result && result.fallback;
+  showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
+  _showSteerRecovery(msg, explicitSteer, fallbackCode);
+  return false;
 }
 
 async function cmdTitle(args){
@@ -1131,6 +1592,7 @@ function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();
   const BRAIN='\uD83E\uDDE0';
   // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
+  // Keep this WebUI effort list in sync with hermes-agent#29248.
   const EFFORTS=['none','minimal','low','medium','high','xhigh'];
   // Shared status renderer used by the no-args branch and as a fallback.
   function _fmtStatus(st){
@@ -1141,7 +1603,8 @@ function cmdReasoning(args){
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
-    api('/api/reasoning').then(function(st){showToast(_fmtStatus(st));})
+    const q=(typeof _reasoningEffortQuery==='function')?_reasoningEffortQuery():'';
+    api('/api/reasoning'+q).then(function(st){showToast(_fmtStatus(st));})
       .catch(function(){showToast(BRAIN+' /reasoning — status unavailable');});
     return true;
   }
@@ -1149,6 +1612,7 @@ function cmdReasoning(args){
     const on=(arg==='show'||arg==='on');
     // Update the UI render gate immediately for responsiveness.
     window._showThinking=on;
+    if(!on&&typeof removeThinking==='function') removeThinking();
     if(typeof renderMessages==='function') renderMessages();
     // Persist via /api/reasoning → config.yaml display.show_reasoning
     // (CLI reads the same key).  Also mirror into WebUI settings.json
@@ -1168,7 +1632,7 @@ function cmdReasoning(args){
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
         showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
-        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff);
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff, st||{});
       })
       .catch(function(e){
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
@@ -1180,7 +1644,15 @@ function cmdReasoning(args){
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');
-  if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
+  const micVisible=!!(
+    mic
+    && mic.style.display!=='none'
+    && !mic.disabled
+    && !mic.classList.contains('composer-control-hidden')
+    && mic.getAttribute('aria-hidden')!=='true'
+    && (!window.getComputedStyle||window.getComputedStyle(mic).display!=='none')
+  );
+  if(micVisible){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
 }
 
@@ -1277,12 +1749,35 @@ function _skillCommandSlug(name){
   if(!raw)return'';
   return raw.replace(/[\s_]+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
 }
+function _getReservedSlashCommandSlugs(){
+  const reserved=new Set(COMMANDS.map(c=>String(c&&c.name||'').trim().toLowerCase()).filter(Boolean));
+  for(const cmd of (_agentCommandCache||[])){
+    const names=[cmd.name].concat(Array.isArray(cmd&&cmd.aliases)?cmd.aliases:[]);
+    for(const name of names){
+      const slug=_skillCommandSlug(name);
+      if(slug) reserved.add(slug);
+    }
+  }
+  return reserved;
+}
 function _buildSkillCommandEntry(skill){
   const skillName=String(skill&&skill.name||'').trim();
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
-  if(COMMANDS.some(c=>c.name===slug)) return null;
+  if(_getReservedSlashCommandSlugs().has(slug)) return null;
   return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+}
+function _buildBundleCommandEntry(bundle){
+  const slug=_skillCommandSlug(bundle&&bundle.name);
+  if(!slug)return null;
+  if(_getReservedSlashCommandSlugs().has(slug)) return null;
+  const skillCount=Number(bundle&&bundle.skill_count||0);
+  return{
+    name:slug,
+    desc:String(bundle&&bundle.description||'').trim()||'Skill bundle',
+    source:'bundle',
+    skillCount:Number.isFinite(skillCount)?skillCount:0,
+  };
 }
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
@@ -1299,10 +1794,32 @@ async function loadSkillCommands(force=false){
   })();
   return _skillCommandLoadPromise;
 }
+async function loadBundleCommands(force=false){
+  if(_bundleCommandCacheReady&&!force)return _bundleCommandCache;
+  if(_bundleCommandLoadPromise&&!force)return _bundleCommandLoadPromise;
+  _bundleCommandLoadPromise=(async()=>{
+    try{
+      await loadAgentCommandMetadata();
+      const data=await api('/api/commands/bundles');
+      const deduped=new Map();
+      for(const bundle of (data&&data.bundles)||[]){const entry=_buildBundleCommandEntry(bundle);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      _bundleCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
+    }catch(_){_bundleCommandCache=[];}
+    finally{_bundleCommandCacheReady=true;_bundleCommandLoadPromise=null;}
+    return _bundleCommandCache;
+  })();
+  return _bundleCommandLoadPromise;
+}
+async function getBundleCommandMetadata(name){
+  const needle=String(name||'').trim().toLowerCase();
+  if(!needle) return null;
+  const bundles=await loadBundleCommands();
+  return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
+}
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
-  if(!text.startsWith('/')||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
+  if(text.indexOf('\n')!==-1||_activeSlashCommandOffset(text)<0){hideCmdDropdown();return;}
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
@@ -1311,6 +1828,9 @@ function refreshSlashCommandDropdown(){
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
   loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
+    loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
+  }
   // Also preload agent/plugin command metadata for autocomplete
   if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
     loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
@@ -1333,20 +1853,49 @@ function showCmdDropdown(matches){
     if(i===_cmdSelectedIdx) el.classList.add('selected');
     el.dataset.idx=i;
     const isSubArg=c.source==='subarg';
+    const isPath=c.source==='path';
     const usage=(!isSubArg&&c.arg)?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
-    const badge=c.source==='skill'?`<span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`:'';
+    const badge=c.source==='skill'
+      ? ` <span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`
+      : c.source==='bundle'
+      ? ' <span class="cmd-item-badge">Bundle</span>'
+      : '';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
-    const nameHtml=isSubArg
+    if(isPath) el.classList.add('cmd-item-path');
+    const nameHtml=isPath
+      ? `<div class="cmd-item-name"><span class="cmd-item-path-value">${esc(c.value)}</span></div>`
+      : isSubArg
       ? `<div class="cmd-item-name"><span class="cmd-item-parent">/${esc(c.parent)}</span> <span class="cmd-item-subarg">${esc(c.value)}</span></div>`
       : `<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div>`;
     const descHtml=`<div class="cmd-item-desc">${esc(c.desc)}</div>`;
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
-      const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
-      $('msg').value=nextValue;
-      $('msg').focus();
-      if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
+      if(isPath){
+        const ta=$('msg');
+        if(!ta){hideCmdDropdown();return;}
+        const start=Number.isFinite(Number(c.tokenStart))?Number(c.tokenStart):ta.selectionStart;
+        const end=Number.isFinite(Number(c.tokenEnd))?Number(c.tokenEnd):ta.selectionEnd;
+        const nextPath=String(c.value||'').endsWith('/')?String(c.value||''):`${String(c.value||'')}/`;
+        const current=String(ta.value||'');
+        const safeStart=Math.max(0,Math.min(start,current.length));
+        const safeEnd=Math.max(safeStart,Math.min(end,current.length));
+        ta.value=current.slice(0,safeStart)+nextPath+current.slice(safeEnd);
+        const pos=safeStart+nextPath.length;
+        ta.focus();
+        ta.setSelectionRange(pos,pos);
+        ta.dispatchEvent(new Event('input',{bubbles:true}));
+        hideCmdDropdown();
+        return;
+      }
+      const _ta=$('msg');
+      const _cur=String(_ta&&_ta.value||'');
+      const _slashIdx=_activeSlashCommandOffset(_cur);
+      const _prefix=_slashIdx>=0?_cur.slice(0,_slashIdx):'';
+      const nextValue=_prefix+(isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':'')));
+      if(_ta)_ta.value=nextValue;
+      if(_ta)_ta.focus();
+      if(!isSubArg&&c.source!=='skill'&&c.source!=='bundle'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
         getSlashAutocompleteMatches(nextValue).then(matches=>{
           if(($('msg').value||'')!==nextValue) return;
           if(matches.length) showCmdDropdown(matches);

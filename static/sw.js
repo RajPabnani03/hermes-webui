@@ -23,7 +23,9 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
+  './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
+  './static/assistant_turn_anchors.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
@@ -34,6 +36,9 @@ const SHELL_ASSETS = [
   './static/workspace.js' + VQ,
   './static/terminal.js' + VQ,
   './static/onboarding.js' + VQ,
+  './static/vendor/smd.min.js' + VQ,
+  './static/vendor/katex/0.16.22/katex.min.css' + VQ,
+  './static/vendor/katex/0.16.22/katex.min.js' + VQ,
   './static/favicon.svg',
   './static/favicon-32.png',
   './manifest.json',
@@ -115,7 +120,7 @@ self.addEventListener('fetch', (event) => {
   // freshly set login cookie until the user manually refreshes.
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request).then((response) => {
+      fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
         if (
           event.request.method === 'GET' &&
           response.status === 200 &&
@@ -152,7 +157,7 @@ self.addEventListener('fetch', (event) => {
   // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
   // has not changed yet (e.g. before a guarded restart updates the ?v token).
   event.respondWith(
-    fetch(event.request).then((response) => {
+    fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
       if (
         event.request.method === 'GET' &&
         response.status === 200
@@ -165,5 +170,40 @@ self.addEventListener('fetch', (event) => {
       status: 503,
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     })))
+  );
+});
+
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const rawUrl = (event.notification.data && event.notification.data.url) || './';
+  const targetUrl = new URL(rawUrl, self.registration.scope || './').href;
+  const targetPath = new URL(targetUrl).pathname;
+  const samePath = (clientUrl) => {
+    try { return new URL(clientUrl).pathname === targetPath; } catch (_e) { return false; }
+  };
+  const sameOrigin = (clientUrl) => {
+    try { return new URL(clientUrl).origin === self.location.origin; } catch (_e) { return false; }
+  };
+  event.waitUntil(
+    self.clients.matchAll({type: 'window', includeUncontrolled: true}).then((clientList) => {
+      // Match on pathname, not the full href: _sessionUrlForSid copies the
+      // current page's query string + hash into the deep link, so an open tab
+      // already on /session/<sid> would fail an exact-href match and spawn a
+      // duplicate window.
+      const targetClient = clientList.find((client) => samePath(client.url) && 'focus' in client);
+      if (targetClient) return targetClient.focus();
+
+      const openNotificationWindow = () => (
+        self.clients.openWindow ? self.clients.openWindow(targetUrl) : undefined
+      );
+      const focusableClient = clientList.find((client) => sameOrigin(client.url) && 'focus' in client && 'navigate' in client);
+      if (focusableClient && 'navigate' in focusableClient) {
+        return focusableClient.navigate(targetUrl)
+          .then((client) => (client && 'focus' in client ? client.focus() : focusableClient.focus()))
+          .catch(() => focusableClient.focus());
+      }
+      return openNotificationWindow();
+    })
   );
 });

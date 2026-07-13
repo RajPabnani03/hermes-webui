@@ -93,7 +93,7 @@ The setup step groups providers by how much information they usually need.
 | Group | Examples | What you usually enter |
 |---|---|---|
 | Easy start | OpenRouter, Anthropic, OpenAI | API key and model. |
-| Open / self-hosted | Ollama, LM Studio, custom OpenAI-compatible | Base URL, model, optional API key. |
+| Open / self-hosted | Ollama, LM Studio, custom OpenAI-compatible, AIML API | Base URL, model, optional API key. |
 | Specialized | Gemini, DeepSeek, Xiaomi MiMo, Z.AI / GLM, NVIDIA NIM, Mistral, xAI | Provider API key and default model. |
 
 For API-key providers, the wizard writes the key to the active Hermes `.env`
@@ -103,6 +103,15 @@ For local providers, the API key field can be blank when the server is keyless.
 Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.
 Use **Test connection** to verify the Base URL and populate the model list
 before continuing.
+
+AIML API uses the existing custom OpenAI-compatible setup path, not a
+first-class built-in Hermes provider id. Configure it under the
+custom-provider flow with Base URL `https://api.aimlapi.com/v1`, then use
+either the normal custom-provider API key field or a config entry that points
+at `AIMLAPI_API_KEY` if you want the custom provider to read its key from the
+environment. Create or manage keys at `https://aimlapi.com/app/keys`. Model
+discovery comes from the live `/v1/models` response for that endpoint, not from
+a static WebUI-maintained model list.
 
 Advanced provider flows such as Nous Portal and GitHub Copilot are still
 terminal-first. OpenAI Codex and Anthropic Claude Code OAuth can be started in
@@ -121,12 +130,24 @@ API root. Common examples:
 | Ollama on the same non-Docker host | `http://127.0.0.1:11434/v1` |
 | LM Studio from Docker Desktop | `http://host.docker.internal:1234/v1` |
 | Ollama from Docker Desktop | `http://host.docker.internal:11434/v1` |
+| Local server from Linux Docker Engine | `http://api.local:<port>/v1` with `api.local:host-gateway` in Compose `extra_hosts` |
 | Local server on another LAN machine | `http://<lan-ip>:<port>/v1` |
 
 Inside Docker, `localhost` means the WebUI container itself, not your Mac,
-Windows host, or another machine on your LAN. If LM Studio or Ollama is running
-outside the container, use `host.docker.internal` on Docker Desktop or the
-server's LAN IP address.
+Windows host, Linux host, or another machine on your LAN. If LM Studio or Ollama
+is running outside the container, use `host.docker.internal` on Docker Desktop,
+use the server's LAN IP address, or add a Linux Docker host alias:
+
+```yaml
+services:
+  hermes-webui:
+    extra_hosts:
+      - "api.local:host-gateway"
+```
+
+Then use `http://api.local:<port>/v1` as the Base URL. The alias avoids writing
+`localhost` in WebUI config where it would resolve to the container loopback
+instead of the host service.
 
 The wizard probes `<base-url>/models` before saving. A successful probe fills
 the model dropdown. A failed probe blocks the setup step and shows an inline
@@ -162,8 +183,8 @@ The wizard uses the same files and APIs as the normal app:
 
 State normally lives outside the repository. By default:
 
-- Hermes Agent state: `~/.hermes`
-- WebUI state: `~/.hermes/webui`
+- Hermes Agent state: Windows `%LOCALAPPDATA%\hermes`; POSIX `~/.hermes`
+- WebUI state: `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`)
 
 Override these with `HERMES_HOME` and `HERMES_WEBUI_STATE_DIR` when you need an
 isolated test install.
