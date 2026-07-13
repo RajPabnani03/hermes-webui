@@ -96,6 +96,7 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
         "date": _day(now),
         "input_tokens": 1200,
         "output_tokens": 300,
+        "cache_read_tokens": 0,
         "sessions": 1,
         "cost": 0.0123,
     }
@@ -103,6 +104,7 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
         "date": _day(now - 86400),
         "input_tokens": 0,
         "output_tokens": 0,
+        "cache_read_tokens": 0,
         "sessions": 0,
         "cost": 0.0,
     }
@@ -130,6 +132,8 @@ def test_insights_model_breakdown_tracks_tokens_cost_and_shares(monkeypatch, tmp
     assert costly["output_tokens"] == 50
     assert costly["total_tokens"] == 150
     assert costly["cost"] == 0.2
+    assert costly["cache_read_tokens"] == 0
+    assert costly["cache_hit_percent"] is None
     assert costly["session_share"] == 33
     assert costly["token_share"] == 18
     assert costly["cost_share"] == 80
@@ -147,8 +151,12 @@ def test_insights_frontend_renders_daily_token_chart_and_model_usage_table():
     assert "insights-daily-bar-input" in PANELS_JS
     assert "insights-daily-bar-output" in PANELS_JS
     assert "insights_model_tokens" in PANELS_JS
+    assert "insights_model_cache" in PANELS_JS
+    assert "insights_cache_hit" in PANELS_JS
     assert "insights_model_cost" in PANELS_JS
     assert "insights_model_share" in PANELS_JS
+    assert "insights_model_team" not in PANELS_JS
+    assert "m.profile || m.team" not in PANELS_JS
     assert "insights_no_usage_data" in PANELS_JS
 
 
@@ -162,6 +170,7 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert ".insights-daily-token-chart" in STYLE_CSS
     assert ".insights-daily-bar-output" in STYLE_CSS
     assert ".insights-model-cost" in STYLE_CSS
+    assert ".insights-model-team" not in STYLE_CSS
 
 
 def _make_daily_rows(n):
@@ -318,3 +327,184 @@ def test_insights_mobile_models_table_has_contained_overflow():
     section_block = STYLE_CSS[section_start:section_end]
     assert 'overflow-x' in section_block, 'Mobile rule should include overflow-x handling'
     assert 'insights-model-table' in section_block or 'insights-card' in section_block
+
+
+# ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
+
+
+def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, days="7", now=None):
+    """Like _call_insights but also seeds an agent state.db with `sessions` rows
+    and points _active_state_db_path at it, so the CLI second-pass is exercised."""
+    import sqlite3
+    import api.routes as routes
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    if now is not None:
+        monkeypatch.setattr(time, "time", lambda: now)
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, model TEXT, message_count INTEGER,
+            input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
+            cache_read_tokens INTEGER DEFAULT 0,
+            started_at REAL, ended_at REAL
+        )"""
+    )
+    for r in state_rows:
+        conn.execute(
+            "INSERT INTO sessions (id, source, model, message_count, input_tokens, "
+            "output_tokens, estimated_cost_usd, cache_read_tokens, started_at, ended_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (r["id"], r.get("source"), r.get("model"), r.get("message_count", 0),
+             r.get("input_tokens", 0), r.get("output_tokens", 0),
+             r.get("estimated_cost_usd", 0.0), r.get("cache_read_tokens", 0),
+             r.get("started_at"), r.get("ended_at")),
+        )
+    conn.commit()
+    conn.close()
+    # _handle_insights does `from api.models import _active_state_db_path`, so patch on the module.
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    handler = _FakeHandler()
+    parsed = SimpleNamespace(query=f"days={days}")
+    routes._handle_insights(handler, parsed)
+    assert handler.status == 200
+    return handler.json_body()
+
+
+def test_insights_includes_cli_and_gateway_sessions(monkeypatch, tmp_path):
+    """CLI / Telegram / Discord sessions in state.db should appear in Insights totals."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    webui_entries = [
+        {"session_id": "w1", "updated_at": now, "created_at": now, "message_count": 2,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost": 0.01, "model": "gpt-5.5"},
+    ]
+    state_rows = [
+        {"id": "cli1", "source": "cli", "model": "gpt-5.5", "message_count": 3,
+         "input_tokens": 200, "output_tokens": 80, "estimated_cost_usd": 0.02,
+         "started_at": now, "ended_at": now},
+        {"id": "tg1", "source": "telegram", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 60, "output_tokens": 20, "estimated_cost_usd": 0.005,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, webui_entries, state_rows, days="7", now=now)
+    # 1 webui + 2 cli/gateway = 3 sessions counted
+    assert data["total_sessions"] == 3
+    # input tokens summed across all three: 100 + 200 + 60 = 360
+    assert data["total_input_tokens"] == 360
+
+
+def test_insights_does_not_double_count_webui_state_db_rows(monkeypatch, tmp_path):
+    """WebUI sessions persist to BOTH _index.json AND state.db (source='webui').
+    The CLI second-pass must exclude source='webui' so they aren't counted twice."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    webui_entries = [
+        {"session_id": "w1", "updated_at": now, "created_at": now, "message_count": 2,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost": 0.01, "model": "gpt-5.5"},
+    ]
+    # The SAME webui session also has a state.db row (source='webui') + one real cli row.
+    state_rows = [
+        {"id": "w1", "source": "webui", "model": "gpt-5.5", "message_count": 2,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost_usd": 0.01,
+         "started_at": now, "ended_at": now},
+        {"id": "cli1", "source": "cli", "model": "gpt-5.5", "message_count": 3,
+         "input_tokens": 200, "output_tokens": 80, "estimated_cost_usd": 0.02,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, webui_entries, state_rows, days="7", now=now)
+    # webui session counted once (from _index.json), cli once = 2, NOT 3.
+    assert data["total_sessions"] == 2
+    # webui tokens counted once (100) + cli (200) = 300, NOT 400.
+    assert data["total_input_tokens"] == 300
+
+
+# ── #3911 / salvage of #3912: prompt-cache hit rate on Insights ────────────
+# Maintainer-flagged correctness fix: the hit rate must use the FULL prompt
+# total as the denominator — cache_read / (input_tokens + cache_read) — so it
+# is bounded 0-100% and means "% of the prompt served from cache". The naive
+# cache_read / input_tokens formula EXCEEDS 100% on cache-heavy sessions.
+
+
+def test_insights_cache_hit_rate_uses_bounded_denominator(monkeypatch, tmp_path):
+    """Per-model + aggregate hit rate = cache_read / (input + cache_read)."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        # 100 fresh input + 300 cached reads -> 300 / (100 + 300) = 75%
+        {"updated_at": now, "message_count": 1, "model": "cached",
+         "input_tokens": 100, "output_tokens": 40, "cache_read_tokens": 300,
+         "estimated_cost": 0.05},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+    model = data["models"][0]
+    assert model["model"] == "cached"
+    assert model["cache_read_tokens"] == 300
+    # cache_read / (input + cache_read) = 300 / 400 = 75 (NOT 300/100 = 300%)
+    assert model["cache_hit_percent"] == 75
+    # Aggregate uses the same bounded denominator.
+    assert data["total_cache_read_tokens"] == 300
+    assert data["total_cache_hit_percent"] == 75
+
+
+def test_insights_cache_hit_rate_never_exceeds_100_percent(monkeypatch, tmp_path):
+    """Non-vacuous boundary test: an extremely cache-heavy session where the OLD
+    formula (cache_read / input_tokens) would report >100%. The bounded
+    denominator must clamp the displayed rate to <=100%.
+
+    Here cache_read (9900) vastly exceeds fresh input (100):
+      OLD (buggy): 9900 / 100         = 9900%   ← would be displayed, absurd
+      NEW (fixed): 9900 / (100+9900)  = 99%     ← bounded, meaningful
+    The assertion below would FAIL under the old formula, so it is non-vacuous.
+    """
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"updated_at": now, "message_count": 1, "model": "cache-heavy",
+         "input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 9900,
+         "estimated_cost": 0.10},
+        # A second model with cache_read == input (would be exactly 100% under
+        # the old formula; 50% under the bounded one) — still <= 100% either way,
+        # included to exercise the equality edge of the bound.
+        {"updated_at": now, "message_count": 1, "model": "balanced",
+         "input_tokens": 500, "output_tokens": 100, "cache_read_tokens": 500,
+         "estimated_cost": 0.02},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+
+    # Prove non-vacuity: the OLD reads-over-misses formula WOULD exceed 100%.
+    heavy = next(m for m in data["models"] if m["model"] == "cache-heavy")
+    old_formula = round((heavy["cache_read_tokens"] / heavy["input_tokens"]) * 100)
+    assert old_formula > 100, "test must exercise a case the old formula mishandles"
+
+    # Every per-model displayed rate is bounded to 0..100.
+    for m in data["models"]:
+        pct = m["cache_hit_percent"]
+        if pct is not None:
+            assert 0 <= pct <= 100, f"{m['model']} hit rate {pct} out of bounds"
+
+    # The fixed bounded denominator: 9900 / (100 + 9900) = 99%.
+    assert heavy["cache_hit_percent"] == 99
+    balanced = next(m for m in data["models"] if m["model"] == "balanced")
+    assert balanced["cache_hit_percent"] == 50
+
+    # Aggregate is bounded too, and < 100 even though cache_read dominates input.
+    assert data["total_cache_hit_percent"] is not None
+    assert 0 <= data["total_cache_hit_percent"] <= 100
+
+
+def test_insights_cache_hit_rate_is_none_without_cache_reads(monkeypatch, tmp_path):
+    """No cache reads -> hit rate is None (not 0%), so the column shows '—'."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [
+        {"updated_at": now, "message_count": 1, "model": "nocache",
+         "input_tokens": 500, "output_tokens": 100, "estimated_cost": 0.03},
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+    assert data["models"][0]["cache_read_tokens"] == 0
+    assert data["models"][0]["cache_hit_percent"] is None
+    assert data["total_cache_hit_percent"] is None
+

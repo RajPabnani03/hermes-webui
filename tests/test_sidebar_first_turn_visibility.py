@@ -16,7 +16,7 @@ class TestSidebarFirstTurnVisibility:
             "send() must optimistically upsert the active session into the sidebar "
             "as soon as the local user message is pushed."
         )
-        push_idx = src.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+        push_idx = src.index("S.messages.push(userMsg);renderMessages();setBusy(true);")
         helper_idx = src.index("upsertActiveSessionForLocalTurn", push_idx)
         start_idx = src.index("api('/api/chat/start'", push_idx)
         assert helper_idx < start_idx, (
@@ -111,7 +111,7 @@ class TestSidebarFirstTurnVisibility:
     def test_backend_index_filter_keeps_pending_first_turn_sessions(self):
         src = read("api/models.py")
         index_filter_start = src.index("# Hide empty Untitled sessions from the UI entirely")
-        index_filter_end = src.index("result = [s for s in result if not _hide_from_default_sidebar", index_filter_start)
+        index_filter_end = src.index("visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar", index_filter_start)
         index_filter = src[index_filter_start:index_filter_end]
         assert "has_pending_user_message" in index_filter, (
             "The index-path empty-session filter must exempt pending first-turn sessions, "

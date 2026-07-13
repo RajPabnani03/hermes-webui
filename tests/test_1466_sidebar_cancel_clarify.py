@@ -23,19 +23,20 @@ class TestSidebarCancelAction:
         """Running sessions need a context-menu cancel action even when not active pane."""
         # Window bumped from 3200 → 4400 in #1764 to accommodate the new
         # Rename action item, then to 5200 in #2111 for response-aware archive
-        # toast handling inside _openSessionActionMenu before the stop/delete
-        # actions.
+        # toast handling, then to 6400 in #2294 for the new "Hide from list"
+        # action prepended for external sessions, then to 7600 in #3106 for
+        # manual title regeneration controls.
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
         # required growing this read window.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 5200)
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 7600)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )
         assert "cancelSessionStream(session)" in body, (
             "running sidebar sessions must expose a stop action that cancels that session"
         )
-        assert body.find("cancelSessionStream(session)") < body.find("deleteSession(session.session_id)"), (
+        assert body.find("cancelSessionStream(session)") < body.find("deleteSession(session.session_id"), (
             "stop action should appear before destructive delete action"
         )
 
@@ -70,13 +71,18 @@ class TestSidebarCancelAction:
         assert "session.source" in body
         assert "session.source_label" in body
         assert "if (_isMessagingSession(session)) return false;" in body
+        assert "raw === 'tui'" in body
         assert "return session.is_cli_session === true;" in body
 
     def test_cli_sessions_hide_duplicate_and_delete_in_action_menu(self):
         """Session action menu should hide duplicate/delete for CLI-origin sessions."""
         # Window bumped 3600 → 4800 in #1764 (Rename action prepended), then
-        # to 5200 in #2111 for response-aware archive toast handling.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 5200)
+        # to 5200 in #2111 for response-aware archive toast handling, then
+        # to 6400 in #2294 for the "Hide from list" action on external sessions,
+        # then to 7200 in #3223 for the "Regenerate title" action (gated on
+        # !session.is_imported) added between Stop-response and the worktree/delete block,
+        # then to 8000 in #3199 for the manual status picker before the danger block.
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8000)
         assert "const isCliSession = _isCliSession(session);" in body
         assert "const isExternalSession = isMessagingSession || isCliSession;" in body
         assert "if(!isExternalSession)" in body
@@ -85,3 +91,12 @@ class TestSidebarCancelAction:
         second = body.find("t('session_delete')")
         assert first > 0 and second > 0, "menu actions should still include duplicate/delete nodes"
         assert first < second, "duplicate action should render before delete action"
+
+    def test_menu_delete_optimistically_removes_sidebar_row_before_backend_cleanup(self):
+        """Context-menu Delete should not keep the row visible while slow DELETE cleanup runs."""
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8400)
+        compact_body = "".join(body.split())
+        assert "awaitdeleteSession(session.session_id,()=>Promise.resolve())" in compact_body, (
+            "menu Delete must pass an immediate beforeDelete hook so deleteSession() "
+            "optimistically removes the sidebar row before awaiting /api/session/delete"
+        )

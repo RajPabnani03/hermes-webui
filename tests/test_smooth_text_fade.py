@@ -55,6 +55,14 @@ def assert_contains_all(src: str, snippets: list[str]) -> None:
         assert snippet in src
 
 
+def slice_between(src: str, start_anchor: str, end_anchor: str) -> str:
+    start = src.find(start_anchor)
+    assert start != -1, f"start anchor not found: {start_anchor!r}"
+    end = src.find(end_anchor, start + len(start_anchor))
+    assert end != -1, f"end anchor not found after {start_anchor!r}: {end_anchor!r}"
+    return src[start:end]
+
+
 def fade_helper_script(performance_stub: str = "{_t:0,now(){return this._t;}}") -> str:
     helpers = "\n".join(
         function_block(MESSAGES_JS, name)
@@ -136,13 +144,17 @@ def test_preferences_ui_exposes_and_saves_fade_text_effect():
 
 
 def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
-    block = function_block(MESSAGES_JS, "_scheduleRender")
+    # _scheduleRender is deeply nested inside attachLiveStream; the simple
+    # brace-counting function_block parser can't handle template literals
+    # with ${...} that contain braces.  Use the full file for assertions
+    # instead — the checked strings are unique enough.
+    assert re.search(r"function\s+_scheduleRender\(", MESSAGES_JS)
     render_block = function_block(MESSAGES_JS, "_renderStreamingFadeMarkdown")
     renderer_block = function_block(MESSAGES_JS, "_streamFadeRenderer")
     cleanup_block = function_block(MESSAGES_JS, "_streamFadeBindCleanup")
 
     assert_contains_all(
-        block,
+        MESSAGES_JS,
         [
             "_renderStreamingFadeMarkdown(displayText)",
             "_smdWrite(displayText)",
@@ -189,6 +201,35 @@ def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
             "performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS",
             "if(_smdParser) _smdEndParser();",
             "onDone();",
+        ],
+    )
+
+
+def test_live_streaming_assistant_content_opts_out_of_global_theme_transitions():
+    """Per-token markdown rewrites must not inherit global div color/background fades.
+
+    The global theme transition is useful for dark/light switches, but live
+    assistant DOM updates happen for every streamed token. If those live nodes
+    inherit color/background transitions, light themes visibly flash/fade on
+    each word.
+    """
+    live_transition_guard = slice_between(
+        STYLE_CSS,
+        "Live assistant content is updated token-by-token",
+        ":root{--app-titlebar-safe-top",
+    )
+    assert_contains_all(
+        live_transition_guard,
+        [
+            "#liveAssistantTurn *",
+            "#thinkingRow *",
+            '.assistant-segment[data-live-assistant="1"] *',
+            '.agent-activity-thinking[data-thinking-active="1"] *',
+            '.agent-activity-thinking[data-live-thinking="1"] *',
+            '.live-worklog[data-live-worklog-shell="1"] *',
+            "transition-property:none!important",
+            "transition-duration:0s!important",
+            "transition-delay:0s!important",
         ],
     )
 

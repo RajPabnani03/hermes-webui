@@ -194,6 +194,23 @@ def test_compose_files_parse_as_valid_yaml():
         assert "services" in data, f"{fname} must define a `services:` block"
 
 
+def test_multi_container_webui_points_at_gateway_service():
+    """REGRESSION (#4483): the multi-container WebUI service needs a compose
+    network URL for the gateway container. Cron listing reads shared state, but
+    scheduled ticking and the Tasks/System gateway health pill need a reachable
+    gateway base URL from inside the WebUI container."""
+    import yaml
+
+    for fname in ("docker-compose.two-container.yml", "docker-compose.three-container.yml"):
+        path = REPO / fname
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = data["services"]["hermes-webui"]["environment"]
+        assert "HERMES_API_URL=http://hermes-agent:8642" in env, (
+            f"{fname}: hermes-webui must point at hermes-agent over the compose "
+            "network so gateway health and scheduled ticking work in multi-container setups."
+        )
+
+
 # ── 7: agent vs webui HERMES_HOME_MODE semantic asymmetry ──────────────────
 
 
@@ -262,3 +279,29 @@ def test_env_docker_example_warns_about_home_mode_asymmetry():
         ".env.docker.example must include a MULTI-CONTAINER WARNING about "
         "the HERMES_HOME_MODE semantic asymmetry between WebUI and agent."
     )
+
+
+# ── 8: Docker localhost and sudo-compose troubleshooting (#3006, #3012) ────
+
+
+def test_docs_docker_warns_about_sudo_compose_home_expansion():
+    """REGRESSION (#3006): the Docker guide must explain that
+    `sudo docker compose` can expand `${HOME}` to `/root`, mounting the wrong
+    `.hermes` directory into the container."""
+    src = (REPO / "docs" / "docker.md").read_text(encoding="utf-8")
+    assert "sudo docker compose" in src
+    assert "/root/.hermes" in src
+    assert "sudo -E docker compose" in src
+    assert "docker group" in src
+
+
+def test_onboarding_docs_cover_linux_host_gateway_for_container_localhost():
+    """REGRESSION (#3012): local-provider onboarding docs must include the
+    Linux Docker host-gateway shape, not only Docker Desktop's
+    `host.docker.internal` shortcut."""
+    src = (REPO / "docs" / "onboarding.md").read_text(encoding="utf-8")
+    assert "host.docker.internal" in src
+    assert "host-gateway" in src
+    assert "extra_hosts" in src
+    assert "api.local" in src
+    assert "localhost" in src and "container" in src

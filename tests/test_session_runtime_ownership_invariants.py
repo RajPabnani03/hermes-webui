@@ -117,6 +117,24 @@ class TestSessionOwnedRuntimeInvariants:
             "the active pane currently owns."
         )
 
+    def test_clarify_sse_fallback_preserves_owner_session_id(self):
+        messages = read("static/messages.js")
+        start_clarify = _function_body(messages, "startClarifyPolling")
+        fallback = _function_body(messages, "_startClarifyFallbackPoll")
+
+        assert "_clarifyPollingSessionId = sid || null" in fallback, (
+            "Any clarify fallback poller should retain its owner session id."
+        )
+        # As of #3913 the clarify transport is poll-only (no SSE onerror path):
+        # startClarifyPolling must route directly to the owner-keyed fallback
+        # poller, and must not clear the polling session id before doing so.
+        assert "_startClarifyFallbackPoll(sid)" in start_clarify, (
+            "startClarifyPolling must hand off to the owner-keyed fallback poller."
+        )
+        assert "_clarifyEventSource.onerror" not in start_clarify, (
+            "SSE onerror path was removed in #3913 — startClarifyPolling polls over HTTP now."
+        )
+
     def test_live_stream_transport_and_inflight_state_remain_session_keyed(self):
         messages = read("static/messages.js")
         close_live = _function_body(messages, "closeLiveStream")
