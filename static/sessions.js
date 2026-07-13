@@ -78,6 +78,24 @@ function _clearRememberedNewChatDraftSession(sid) {
   } catch (_) {}
 }
 
+function _announceNewChatWorkspace(session) {
+  const ann = $('srAnnouncements');
+  if (!ann) return;
+  const ws = session && (session.workspace || session.workspace_path || null);
+  if (!ws) {
+    ann.textContent = '';
+    return;
+  }
+  const name = (typeof getWorkspaceFriendlyName === 'function')
+    ? getWorkspaceFriendlyName(ws)
+    : ws;
+  const message = t('workspace_new_chat_announcement', name);
+  // Clear then re-set in a fresh task so screen readers announce repeated
+  // consecutive new chats in the same workspace (the text is identical).
+  ann.textContent = '';
+  requestAnimationFrame(() => { ann.textContent = message; });
+}
+
 async function _restoreRememberedNewChatDraftSession() {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
@@ -1050,6 +1068,7 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;S.messages=data.session.messages||[];
+    _announceNewChatWorkspace(S.session);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -3494,7 +3513,12 @@ function _renderBatchActionBar(){
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
     const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
-    const ok=await showConfirmDialog({
+    const anyWorktree=ids.some(sid=>{
+      const s=_sessionSnapshotById(sid);
+      return s&&s.worktree_path;
+    });
+    const skipConfirm=!anyWorktree && localStorage.getItem('hermes-skip-delete-confirm')==='1';
+    const ok=skipConfirm?true:await showConfirmDialog({
       message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
       confirmLabel:t('delete_title'),
       danger:true
@@ -7801,9 +7825,16 @@ async function removeWorktree(session){
   }
 }
 
+function _skipSessionDeleteConfirm(session){
+  if(!session||session.worktree_path) return false;
+  try{
+    return localStorage.getItem('hermes-skip-delete-confirm')==='1' || (S.settings&&S.settings.skip_session_delete_confirm===true);
+  }catch(_e){return false;}
+}
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
-  const ok=await showConfirmDialog({
+  const skipConfirm=_skipSessionDeleteConfirm(session);
+  const ok=skipConfirm?true:await showConfirmDialog({
     message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
     confirmLabel:t('delete_title'),
     danger:true

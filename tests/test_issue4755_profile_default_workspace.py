@@ -112,6 +112,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function _rememberNewChatDraftSession(){{}}
         function _setActiveSessionUrl(){{}}
         function _setSessionViewedCount(){{}}
+        function _announceNewChatWorkspace(){{}}
         function updateSendBtn(){{}}
         function setStatus(){{}}
         function setComposerStatus(){{}}

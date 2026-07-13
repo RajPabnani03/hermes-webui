@@ -8,7 +8,7 @@
 > Keep this document updated as architecture changes are made.
 
 > Current shipped build: `v0.51.192` (May 31, 2026).
-> Automated coverage: ~7,150 tests via `pytest tests/ --collect-only -q`. CI runs on
+> Automated coverage: ~11,806 tests via `./scripts/test.sh tests/ --collect-only -q`. CI runs on
 > Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
 > lint gate, a headless browser smoke test, and a Docker smoke test.
 >
@@ -86,7 +86,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       sw.js                Service worker: offline shell cache, version-pinned assets
     tests/
       conftest.py          Isolated test server/state fixtures
-      ~700 test files      ~7,150 tests collected via pytest (run `pytest --collect-only -q` for exact)
+      ~700 test files      ~11,806 tests collected via `./scripts/test.sh tests/ --collect-only -q` (run for exact current count)
       test_regressions.py  Permanent regression gate
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.

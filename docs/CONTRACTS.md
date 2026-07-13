@@ -13,6 +13,8 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 - [`AGENTS.md`](../AGENTS.md): repository entry point for AI assistants,
   public-safety rules, and the short redline checklist.
+- [`docs/agent-knowledge.md`](agent-knowledge.md): single onboarding map for
+  architecture, state layers, test harness behavior, and investigation backlog.
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md): contribution style, verification,
   PR description expectations, UI evidence, and project-specific constraints.
 - [`README.md`](../README.md): product overview, quick start, architecture map,
