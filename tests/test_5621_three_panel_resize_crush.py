@@ -17,6 +17,7 @@ import pytest
 
 ROOT = Path(__file__).parent.parent
 BOOT_JS = ROOT / "static" / "boot.js"
+STYLE_CSS = ROOT / "static" / "style.css"
 NODE = shutil.which("node")
 
 node_test = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -125,6 +126,27 @@ def test_window_resize_listener_calls_clamp():
     block = src[idx:idx + 300]
     assert "_clampBothPanelsOnResize" in block, (
         "window resize listener must clamp panels to prevent crush"
+    )
+
+
+def test_desktop_css_keeps_center_readable():
+    """Desktop three-panel CSS must give the chat a 420px floor and let rails yield."""
+    src = STYLE_CSS.read_text(encoding="utf-8")
+    start = src.find("@media(min-width:901px)")
+    assert start != -1, "desktop three-panel media query not found"
+    end = src.find("@media(", start + 1)
+    block = src[start:end if end != -1 else start + 800]
+    assert ".main{flex:1 1 420px;min-width:420px;}" in block, (
+        "center chat must keep a 420px floor on desktop"
+    )
+    assert ".sidebar{flex-shrink:1;min-width:180px;}" in block, (
+        "sidebar must yield before crushing the center chat"
+    )
+    assert ".rightpanel{flex-shrink:1;min-width:180px;}" in block, (
+        "workspace panel must yield before crushing the center chat"
+    )
+    assert "min-width:0 !important" in block, (
+        "collapsed workspace panel must drop its min-width so the chat can expand"
     )
 
 
