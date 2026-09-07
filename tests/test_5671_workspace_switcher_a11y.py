@@ -47,6 +47,7 @@ def test_composer_workspace_chip_has_popup_ar_attributes():
     tag = chip.group(0)
     assert 'aria-haspopup="true"' in tag
     assert 'aria-expanded="false"' in tag
+    assert 'aria-controls="composerWsDropdown"' in tag
     assert 'aria-label="Switch workspace"' in tag
 
     label = re.search(

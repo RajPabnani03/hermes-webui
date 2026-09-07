@@ -295,7 +295,8 @@
         </div>
       </div>
       <div class="panel-head-sub" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
-      <div style="flex:1;overflow-y:auto;padding:8px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="workspaces-list" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="workspaces-hint" id="workspacesHint" data-i18n="workspace_paths_validated_hint">Paths are validated as existing directories before saving.</div>
     </div>
     <!-- Profiles panel -->
     <div class="panel-view" id="panelProfiles">
@@ -626,7 +627,7 @@
                 <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false" aria-label="Toggle workspace files panel">
                   <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                 </button>
-                <button class="composer-workspace-chip" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="Switch workspace" aria-haspopup="true" aria-expanded="false" aria-label="Switch workspace" disabled>
+                <button class="composer-workspace-chip" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="Switch workspace" aria-haspopup="true" aria-expanded="false" aria-controls="composerWsDropdown" aria-label="Switch workspace" disabled>
                   <span class="composer-workspace-label" id="composerWorkspaceLabel" aria-hidden="true"></span>
                   <span class="composer-workspace-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
                 </button>
