@@ -192,6 +192,48 @@ function _isPhoneWidthViewport(){
   return window.matchMedia('(max-width: 640px)').matches;
 }
 
+// Panel width constants used by the resizable-panel IIFE and the workspace-panel
+// inline-width sync. The MAIN_PANEL_MIN_WIDTH is the floor for the center chat
+// area so the three-panel layout cannot be resized to the point that the chat is
+// unusable (#5621).
+const SIDEBAR_MIN=180, SIDEBAR_MAX=420;
+const PANEL_MIN=180, PANEL_MAX=1200;
+const MAIN_PANEL_MIN_WIDTH=420;
+
+// Clamp a candidate panel width to the available viewport so the center chat
+// area always keeps at least MAIN_PANEL_MIN_WIDTH. Handles the case where the
+// other panel is collapsed (width 0) or hidden by returning a wider max allowance.
+function _clampPanelWidthForViewport(width, targetEl, otherEl, minW, maxW){
+  if(!targetEl) return width;
+  const viewport = window.innerWidth;
+  const otherWidth = otherEl ? otherEl.getBoundingClientRect().width : 0;
+  const maxAllowed = Math.max(minW, viewport - otherWidth - MAIN_PANEL_MIN_WIDTH);
+  return Math.min(maxW, Math.max(minW, Math.min(width, maxAllowed)));
+}
+
+// Ensure the open left/right panels are not so wide that the center chat area is
+// crushed below MAIN_PANEL_MIN_WIDTH. Runs after restoration and on viewport resize.
+function _clampBothPanelsOnResize(){
+  if(_isPhoneWidthViewport()) return;
+  const sidebar = document.querySelector('.sidebar');
+  const rightpanel = document.querySelector('.rightpanel');
+  if(!sidebar || !rightpanel) return;
+
+  const sidebarW = sidebar.getBoundingClientRect().width;
+  const rightW = rightpanel.getBoundingClientRect().width;
+  const viewport = window.innerWidth;
+  if(sidebarW + rightW + MAIN_PANEL_MIN_WIDTH <= viewport) return;
+
+  let excess = sidebarW + rightW + MAIN_PANEL_MIN_WIDTH - viewport;
+  // Shrink the right panel first, then the sidebar, never below their min widths.
+  let newRightW = Math.max(PANEL_MIN, rightW - excess);
+  excess -= (rightW - newRightW);
+  let newSidebarW = Math.max(SIDEBAR_MIN, sidebarW - excess);
+
+  if(newRightW !== rightW) rightpanel.style.width = newRightW + 'px';
+  if(newSidebarW !== sidebarW) sidebar.style.width = newSidebarW + 'px';
+}
+
 // Mobile PWA viewport reflow guard. When the on-screen keyboard / browser
 // chrome shows or hides, visualViewport (or a plain resize on browsers without
 // it) changes height without a layout invalidation, leaving the phone layout
@@ -225,7 +267,9 @@ function _syncWorkspacePanelInlineWidth(){
   if(!saved) return;
   const parsed = parseInt(saved, 10);
   if(Number.isNaN(parsed) || parsed <= 0) return;
-  panel.style.width = `${parsed}px`;
+  const sidebar = document.querySelector('.sidebar');
+  const clamped = _clampPanelWidthForViewport(parsed, panel, sidebar, PANEL_MIN, PANEL_MAX);
+  panel.style.width = `${clamped}px`;
 }
 
 function _workspacePanelEls(){
@@ -2189,6 +2233,7 @@ function applyEmptyStateSuggestionPref(){
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
+  _clampBothPanelsOnResize();
   if(!window.visualViewport) _forceMobileViewportReflow();
 });
 
@@ -2211,19 +2256,24 @@ if(window.visualViewport){
 // Boot: restore last session or start fresh
 // ── Resizable panels ──────────────────────────────────────────────────────
 (function(){
-  const SIDEBAR_MIN=180, SIDEBAR_MAX=420;
-  const PANEL_MIN=180,   PANEL_MAX=1200;
-
   function initResize(handleId, targetEl, edge, minW, maxW, storageKey){
     const handle = $(handleId);
     if(!handle || !targetEl) return;
 
-    // Restore saved width
+    // Restore saved width, clamped to the current viewport so a large saved
+    // width from a wide monitor doesn't crush the chat on a narrower one (#5621).
     if(storageKey === 'hermes-panel-w'){
       _syncWorkspacePanelInlineWidth();
     }else{
       const saved = localStorage.getItem(storageKey);
-      if(saved) targetEl.style.width = saved + 'px';
+      if(saved){
+        const parsed = parseInt(saved, 10);
+        const otherEl = document.querySelector('.rightpanel') === targetEl
+          ? document.querySelector('.sidebar')
+          : document.querySelector('.rightpanel');
+        const clamped = _clampPanelWidthForViewport(parsed, targetEl, otherEl, minW, maxW);
+        targetEl.style.width = clamped + 'px';
+      }
     }
 
     let startX=0, startW=0;
@@ -2234,10 +2284,13 @@ if(window.visualViewport){
       startW = targetEl.getBoundingClientRect().width;
       handle.classList.add('dragging');
       document.body.classList.add('resizing');
+      const otherEl = document.querySelector('.rightpanel') === targetEl
+        ? document.querySelector('.sidebar')
+        : document.querySelector('.rightpanel');
 
       const onMove = ev=>{
         const delta = edge==='right' ? ev.clientX - startX : startX - ev.clientX;
-        const newW = Math.min(maxW, Math.max(minW, startW + delta));
+        const newW = _clampPanelWidthForViewport(startW + delta, targetEl, otherEl, minW, maxW);
         targetEl.style.width = newW + 'px';
       };
       const onUp = ()=>{
@@ -2258,6 +2311,9 @@ if(window.visualViewport){
     const rightpanel = document.querySelector('.rightpanel');
     initResize('sidebarResize',    sidebar,    'right', SIDEBAR_MIN, SIDEBAR_MAX, 'hermes-sidebar-w');
     initResize('rightpanelResize', rightpanel, 'left',  PANEL_MIN,   PANEL_MAX,   'hermes-panel-w');
+    // Apply a one-time clamp after restoring saved widths so the initial paint
+    // respects MAIN_PANEL_MIN_WIDTH on narrow viewports (#5621).
+    _clampBothPanelsOnResize();
   };
 })();
 
