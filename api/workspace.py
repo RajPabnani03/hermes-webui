@@ -1430,6 +1430,23 @@ def list_dir(workspace: Path, rel: str='.'):
     return entries
 
 
+_BINARY_SNIFF_BYTES = 8192
+
+
+def _is_binary_file(path: Path) -> bool:
+    """Return True if the file appears to contain binary (non-text) content.
+
+    Reads the first ``_BINARY_SNIFF_BYTES`` bytes and checks for null bytes,
+    which is the same heuristic Git uses for binary detection.
+    """
+    try:
+        with open(path, 'rb') as f:
+            chunk = f.read(_BINARY_SNIFF_BYTES)
+        return b'\x00' in chunk
+    except OSError:
+        return False
+
+
 def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
     """Return a cheap, stable signature for a listed workspace directory.
 
@@ -1471,6 +1488,9 @@ def read_file_content(workspace: Path, rel: str) -> dict:
         if st.st_size > MAX_FILE_BYTES:
             raise ValueError(f"File too large ({st.st_size} bytes, max {MAX_FILE_BYTES})")
         raw = fh.read(MAX_FILE_BYTES + 1)
+    # Binary detection: check for null bytes before attempting text decode.
+    if b'\x00' in raw[:(_BINARY_SNIFF_BYTES + 1)]:
+        return {'path': rel, 'binary': True, 'size': len(raw)}
     if Path(str(rel)).suffix.lower() in {".docx", ".xlsx", ".pptx"}:
         from api.office_documents import preview_office_document
 
