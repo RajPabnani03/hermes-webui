@@ -245,6 +245,15 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
 
+### Speech playback API
+- `POST /api/tts` accepts JSON with `text` and an optional `engine`.
+- Omitting `engine` or sending an empty string uses the saved WebUI `tts_engine`
+  preference when it is `edge`, `elevenlabs`, or `openai`. Missing, empty,
+  browser-only, unknown, or malformed preferences fall back to Edge.
+- An explicit server engine overrides the saved preference. OpenAI-compatible
+  base URL, model, and voice still come from the active profile's
+  `config.yaml` under `tts.openai`, not from WebUI settings.
+
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
 - Gateway status dots (green = running), model info, skill count per profile

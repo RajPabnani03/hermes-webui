@@ -129,7 +129,8 @@ def test_openai_tts_prefers_voice_tools_key_over_openai_key(monkeypatch):
     assert captured["auth"] == "Bearer sk-voice-tools"
 
 
-def test_openai_tts_config_overrides(monkeypatch):
+@pytest.mark.parametrize("request_engine", [{"engine": "openai"}, {}, {"engine": ""}])
+def test_openai_tts_config_overrides(monkeypatch, request_engine):
     captured = {}
     import api.config as config
 
@@ -139,16 +140,60 @@ def test_openai_tts_config_overrides(monkeypatch):
         return _StreamOnceResponse([b"custom"])
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(routes, "load_settings", lambda: {"tts_engine": "openai"})
     monkeypatch.setattr(config, "get_config", lambda: {
         "tts": {"openai": {"base_url": "https://custom.example.com/v1/", "model": "tts-custom", "voice": "nova"}}
     })
     monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
-    h = _post({"text": "Hello", "engine": "openai"}, client="10.82.0.4")
+    h = _post({"text": "Hello", **request_engine}, client="10.82.0.4")
     routes._handle_tts(h, None)
 
     assert h.status == 200
     assert captured["url"] == "https://custom.example.com/v1/audio/speech"
     assert captured["body"] == {"model": "tts-custom", "input": "Hello", "voice": "nova"}
+
+
+@pytest.mark.parametrize("settings,expected", [
+    ({"tts_engine": "edge"}, "edge"),
+    ({"tts_engine": "elevenlabs"}, "elevenlabs"),
+    ({"tts_engine": "openai"}, "openai"),
+    ({"tts_engine": " OPENAI "}, "openai"),
+    ({}, "edge"),
+    ({"tts_engine": ""}, "edge"),
+    ({"tts_engine": "browser"}, "edge"),
+    ({"tts_engine": "unknown"}, "edge"),
+    ({"tts_engine": None}, "edge"),
+    ({"tts_engine": ["openai"]}, "edge"),
+])
+@pytest.mark.parametrize("request_engine", [None, "", "edge", "elevenlabs", "openai"])
+def test_tts_saved_engine_default_and_explicit_override(monkeypatch, settings, expected, request_engine):
+    import sys
+    from types import SimpleNamespace
+    import api.config as config
+    import urllib.request
+
+    class FakeCommunicate:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def stream_sync(self):
+            yield {"type": "audio", "data": b"edge"}
+
+    monkeypatch.setattr(routes, "load_settings", lambda: settings)
+    monkeypatch.setattr(config, "get_config", lambda: {})
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-elevenlabs")
+    monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=FakeCommunicate))
+    monkeypatch.setattr(routes, "_tts_open", lambda *a, **kw: _StreamOnceResponse([b"openai"]))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: _StreamOnceResponse([b"elevenlabs"]))
+    body = {"text": "Hello", "voice": "en-US-AriaNeural"}
+    if request_engine is not None:
+        body["engine"] = request_engine
+    h = _post(body)
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert h.wfile.getvalue() == (request_engine or expected).encode()
 
 
 @pytest.mark.parametrize("base_url", [
