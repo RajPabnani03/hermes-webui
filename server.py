@@ -100,7 +100,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth
+from api.auth import check_auth, _drain_request_body
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
@@ -437,10 +437,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         """Handle CORS preflight requests."""
         self._req_t0 = time.time()
+        # Consume any (unexpected) body so keep-alive stays in sync, then
+        # frame the empty response: without Content-Length an HTTP/1.1
+        # keep-alive 200 is read-until-close, hanging the client.
+        _drain_request_body(self)
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_DELETE(self) -> None:

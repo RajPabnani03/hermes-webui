@@ -685,6 +685,61 @@ def parse_cookie(handler) -> str | None:
     return morsel.value if morsel else None
 
 
+def _drain_request_body(handler, _max_bytes: int = 20 * 1024 * 1024) -> None:
+    """Consume an unread request body so a keep-alive connection stays in sync.
+
+    When an early response (401/302) is written without reading ``rfile``,
+    the leftover body bytes are parsed as the next request line and the
+    following request on that connection fails with 501 (issue #7550).
+    Draining small bodies keeps the connection reusable for proxies.
+    Bodies that cannot be framed reliably (chunked encoding, invalid or
+    oversized Content-Length) fall back to ``close_connection``.
+    """
+    try:
+        headers = getattr(handler, 'headers', None)
+        transfer_encoding = headers.get('Transfer-Encoding', '') if headers else ''
+    except Exception:
+        transfer_encoding = ''
+    try:
+        if transfer_encoding and 'chunked' in str(transfer_encoding).lower():
+            try:
+                handler.close_connection = True
+            except Exception:
+                pass
+            return
+    except Exception:
+        pass
+    try:
+        raw_length = headers.get('Content-Length') if headers else None
+    except Exception:
+        raw_length = None
+    if raw_length is None or raw_length == '':
+        return
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        return
+    if length <= 0:
+        return
+    if length > _max_bytes:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        return
+    try:
+        handler.rfile.read(length)
+    except Exception:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -697,7 +752,10 @@ def check_auth(handler, parsed) -> bool:
     cookie_val = parse_cookie(handler)
     if cookie_val and verify_session(cookie_val):
         return True
-    # Not authorized
+    # Not authorized. Drain any request body first so the keep-alive
+    # connection stays in sync (issue #7550): leftover body bytes would
+    # otherwise be parsed as the next request line (501 on next request).
+    _drain_request_body(handler)
     if parsed.path.startswith('/api/'):
         body = b'{"error":"Authentication required"}'
         handler.send_response(401)
