@@ -1690,7 +1690,15 @@ def _compute_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
         except Exception:
             pass
 
-    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    # #7305: agent.skill_utils is optional. In two-container / gateway
+    # deployments the Agent source is not mounted, so this import raises.
+    # Skill counts are then unknown — report a stable (0, 0) rather than
+    # 500ing GET /api/profiles. Do not invent a local SKILL.md walker here:
+    # Agent exclusions (platform, support dirs) would drift.
+    try:
+        from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    except ImportError:
+        return (0, 0)
 
     seen_names = set()
     enabled_count = 0
