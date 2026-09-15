@@ -97,6 +97,68 @@ logger = logging.getLogger(__name__)
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
 
 
+def _fair_custom_probe_timeout(
+    probe_count: int,
+    *,
+    budget: float | None = None,
+    cap: float | None = None,
+) -> float:
+    """Per-endpoint timeout that cannot consume the whole cold-rebuild budget.
+
+    Custom ``/v1/models`` probes run serially (active ``model.base_url`` first,
+    then named ``custom_providers`` in config order). Each probe used to take
+    the full ``CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS`` (5s) cap, which is
+    larger than ``_LIVE_REBUILD_BUDGET_SECONDS`` (4s), so one unreachable
+    endpoint starved every provider behind it (#7481).
+
+    Split the *current* rebuild budget evenly across the probes that will
+    actually run. ``budget <= 0`` keeps the legacy unbounded cap. Ordering,
+    SSRF, and auth are unchanged; this only shortens the connect timeout.
+    """
+    if cap is None:
+        cap = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+    cap = float(cap)
+    if budget is None:
+        budget = _LIVE_REBUILD_BUDGET_SECONDS
+    try:
+        budget = float(budget)
+    except (TypeError, ValueError):
+        budget = 4.0
+    count = int(probe_count or 0)
+    if budget <= 0 or count <= 0:
+        return cap
+    return min(cap, budget / count)
+
+
+def _custom_provider_entry_will_live_probe(entry: object) -> bool:
+    """True when the catalog builder will call ``/v1/models`` for this entry."""
+    if not isinstance(entry, dict):
+        return False
+    if not str(entry.get("name") or "").strip():
+        return False
+    if not str(entry.get("base_url") or "").strip():
+        return False
+    configured = entry.get("models")
+    # Match the builder: a non-empty models list/dict skips the live probe.
+    return not (isinstance(configured, (dict, list)) and len(configured) > 0)
+
+
+def _count_serial_custom_catalog_probes(config_obj: object) -> int:
+    """Count serial custom-endpoint probes for one catalog rebuild (#7481)."""
+    if not isinstance(config_obj, dict):
+        return 0
+    count = 0
+    model_cfg = config_obj.get("model")
+    if isinstance(model_cfg, dict) and str(model_cfg.get("base_url") or "").strip():
+        count += 1
+    custom_providers = config_obj.get("custom_providers")
+    if isinstance(custom_providers, list):
+        count += sum(
+            1 for entry in custom_providers if _custom_provider_entry_will_live_probe(entry)
+        )
+    return count
+
+
 def _env_mb_bytes(name: str, default_mb: int) -> int:
     """Parse an optional megabyte environment variable into bytes.
 
@@ -6214,6 +6276,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
+            timeout: float | None = None,
         ) -> tuple[list[dict], dict | None]:
             base = str(base_url or "").strip()
             if not base:
@@ -6264,7 +6327,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 req.add_header("User-Agent", "OpenAI/Python 1.0")
                 for k, v in headers.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
+                probe_timeout = (
+                    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                    if timeout is None
+                    else float(timeout)
+                )
+                with urllib.request.urlopen(req, timeout=probe_timeout) as response:  # nosec B310
                     data = json.loads(response.read().decode("utf-8"))
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
@@ -6279,6 +6347,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
+        _custom_probe_timeout = _fair_custom_probe_timeout(
+            _count_serial_custom_catalog_probes(cfg)
+        )
         if cfg_base_url:
             base_url = cfg_base_url.strip()
             configured_provider = _configured_provider_for_base_url(base_url)
@@ -6350,6 +6421,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider,
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
+                timeout=_custom_probe_timeout,
             )
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
@@ -6423,6 +6495,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _slug,
                             api_key=_cp_api_key,
                             trusted_base_urls=(_cp_base_url,),
+                            timeout=_custom_probe_timeout,
                         )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
@@ -6871,7 +6944,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             try:
                                 import urllib.request as _urlreq
                                 req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
+                                with _urlreq.urlopen(req, timeout=_custom_probe_timeout) as resp:
                                     lm_data = json.loads(resp.read().decode())
                                 for m in (lm_data.get("data") or []):
                                     if isinstance(m, dict):

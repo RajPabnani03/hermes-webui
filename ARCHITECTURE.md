@@ -376,6 +376,26 @@ read_file_content(workspace, rel):
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
 
+### 4.8 Model Catalog Rebuild Budget and Probe Scheduling
+
+Cold `GET /api/models` rebuilds are bounded by `_LIVE_REBUILD_BUDGET_SECONDS`
+(default 4s, `HERMES_WEBUI_MODELS_REBUILD_BUDGET`; `0` restores the unbounded
+legacy path). Custom OpenAI-compatible `/v1/models` probes still run **serially
+in config order**: the active `model.base_url` first, then named
+`custom_providers` without a static `models:` allowlist.
+
+Each of those probes used to take `CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS` (5s).
+That cap is larger than the 4s budget, so one unreachable LAN/active endpoint
+consumed the whole window and every reachable provider behind it was skipped
+in-band (#7481). `_fair_custom_probe_timeout(N)` now hands each serial custom
+probe `min(cap, budget / N)` so the chain cannot outspend the budget while the
+foreground caller is still waiting. Provider order, SSRF, and authentication
+are unchanged. The LM Studio provider-group fallback uses the same timeout.
+
+This is scheduling isolation only. Out-of-band publication, generation fencing,
+and disk-cache races remain the existing `_claim_publish` / `budget_exceeded`
+contract and are out of this section's scope.
+
 ---
 
 ## 5. Frontend Architecture: Current State
