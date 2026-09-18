@@ -2459,6 +2459,101 @@ def _get_provider_cfg(provider_id) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
+def _colon_tagged_model_ids_from_value(raw_models: object) -> list[str]:
+    if isinstance(raw_models, dict):
+        candidates = raw_models
+    elif isinstance(raw_models, list):
+        candidates = raw_models
+    else:
+        return []
+    model_ids: list[str] = []
+    for item in candidates:
+        if isinstance(item, str):
+            value = item.strip()
+        elif isinstance(item, dict):
+            value = str(item.get("id") or "").strip()
+        else:
+            continue
+        if value:
+            model_ids.append(value)
+    return model_ids
+
+
+def _colon_tagged_model_declared(
+    model_id: str,
+    config_obj: dict | None = None,
+) -> bool:
+    """True when ``model_id`` is declared verbatim on the owning config."""
+    model = str(model_id or "").strip()
+    if not model or ":" not in model:
+        return False
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    if not isinstance(source, dict):
+        return False
+    model_cfg = source.get("model", {})
+    if isinstance(model_cfg, dict):
+        if str(model_cfg.get("default") or "").strip() == model:
+            return True
+        if model in _colon_tagged_model_ids_from_value(model_cfg.get("models")):
+            return True
+    providers_cfg = source.get("providers", {})
+    if isinstance(providers_cfg, dict):
+        for provider_cfg in providers_cfg.values():
+            if isinstance(provider_cfg, dict) and model in _colon_tagged_model_ids_from_value(
+                provider_cfg.get("models")
+            ):
+                return True
+    for entry in _custom_provider_entries(source):
+        if str(entry.get("model") or "").strip() == model:
+            return True
+        if model in _colon_tagged_model_ids_from_value(entry.get("models")):
+            return True
+    return False
+
+
+def _parse_provider_qualified_model_id(
+    model_id: str,
+    config_obj: dict | None = None,
+) -> tuple[str, str] | None:
+    """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
+
+    ``@custom:<slug>:<rest>`` is ambiguous: it may be a named custom provider
+    plus a model, or the built-in ``custom`` transport plus a colon-tagged
+    model. Keep ``custom:<slug>`` when that named provider exists or when the
+    reconstructed ``name:tag`` is not a configured model. Otherwise peel the
+    tagged model back onto ``custom`` (#7073).
+    """
+    candidate = str(model_id or "").strip()
+    if not candidate.startswith("@") or ":" not in candidate:
+        return None
+    inner = candidate[1:]
+    provider_hint, bare_model = inner.rsplit(":", 1)
+    if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
+        _slug_rest = provider_hint[len("custom:"):]
+        if not _custom_slug_rest_looks_like_host_port(_slug_rest):
+            provider_hint, extra = provider_hint.rsplit(":", 1)
+            bare_model = f"{extra}:{bare_model}"
+    elif provider_hint.startswith("custom:") and provider_hint.count(":") == 1:
+        named_slugs = _named_custom_provider_slugs(config_obj)
+        if provider_hint not in named_slugs:
+            reconstructed = f"{provider_hint[len('custom:'):]}:{bare_model}"
+            source = config_obj if isinstance(config_obj, dict) else cfg
+            model_cfg = source.get("model", {}) if isinstance(source, dict) else {}
+            owner = str(
+                (model_cfg.get("provider") if isinstance(model_cfg, dict) else "") or ""
+            ).strip().lower()
+            if _colon_tagged_model_declared(reconstructed, config_obj) or (
+                _is_local_server_provider(owner) and owner != "custom"
+            ):
+                provider_hint = "custom"
+                bare_model = reconstructed
+    elif (provider_hint not in _PROVIDER_MODELS
+            and provider_hint not in _PROVIDER_DISPLAY
+            and not provider_hint.startswith("custom:")):
+        provider_hint, bare_model = inner.split(":", 1)
+    return bare_model, provider_hint
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -2584,18 +2679,29 @@ def resolve_model_provider(model_id: str) -> tuple:
     #
     # Exception: ``custom:<ip-or-host>:<port>`` is a single logical slug derived
     # from OpenAI ``base_url`` authority and contains no eaten model segments.
-    if model_id.startswith("@") and ":" in model_id:
-        inner = model_id[1:]
-        provider_hint, bare_model = inner.rsplit(":", 1)
-        if provider_hint.startswith("custom:") and provider_hint.count(":") >= 2:
-            _slug_rest = provider_hint[len("custom:"):]
-            if not _custom_slug_rest_looks_like_host_port(_slug_rest):
-                provider_hint, extra = provider_hint.rsplit(":", 1)
-                bare_model = f"{extra}:{bare_model}"
-        elif (provider_hint not in _PROVIDER_MODELS
-                and provider_hint not in _PROVIDER_DISPLAY
-                and not provider_hint.startswith("custom:")):
-            provider_hint, bare_model = inner.split(":", 1)
+    parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
+    if parsed_provider_hint is not None:
+        bare_model, provider_hint = parsed_provider_hint
+        if (
+            isinstance(config_provider, str)
+            and _is_local_server_provider(config_provider)
+            and ":" in str(bare_model or "")
+            and (
+                provider_hint == "custom"
+                or (
+                    provider_hint.startswith("custom:")
+                    and provider_hint not in _named_custom_provider_slugs()
+                    and not _custom_slug_rest_looks_like_host_port(
+                        provider_hint[len("custom:"):]
+                    )
+                )
+            )
+        ):
+            return (
+                bare_model,
+                config_provider,
+                config_base_url or _get_provider_base_url(config_provider),
+            )
         if (
             provider_hint.startswith("custom:")
             and config_base_url
