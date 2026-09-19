@@ -6,7 +6,14 @@ This file tracks UI bugs and polish items. Fixed items are kept for reference.
 
 ## Open Bugs
 
-*No open bugs at this time.*
+- **Historical ambiguous provider pins (#7585)** — Model changes no longer
+  inherit the previous model's provider when the request omits a provider.
+  Already-saved unqualified model/provider pairs cannot always be repaired
+  automatically: the same model can legitimately be served by Nous, OpenRouter,
+  or a custom endpoint, and a missing catalog entry is not proof of ownership.
+  Re-select the intended model **and provider** in the model picker to correct
+  an affected session. Existing explicit selections remain authoritative; this
+  avoids silently changing billing providers based on partial discovery results.
 
 ---
 
@@ -23,6 +30,18 @@ This file tracks UI bugs and polish items. Fixed items are kept for reference.
 ---
 
 ## Fixed
+
+### Provider inherited across model changes — prevention for #7585
+
+- **Was:** A model-only update or chat request retained the old model's
+  `model_provider`, potentially routing the new model through OpenRouter.
+- **Fix:** Session updates, streaming/synchronous chat, and goal kickoff only
+  inherit a provider when the model is unchanged. An explicitly supplied provider
+  remains authoritative. Updates persist the corrected pair using the existing
+  session save path; no bulk migration or catalog-driven rerouting is performed.
+- **Verification:** `tests/test_issue7585_stale_model_provider.py` exercises
+  model changes, unchanged selections, explicit custom providers, route save
+  behavior, and profile-aware chat startup.
 
 ### ~~Session title truncation / hover actions~~ -- Fixed (Sprint 16)
 
