@@ -188,6 +188,28 @@ The wizard uses the same files and APIs as the normal app:
 - WebUI `settings.json`: onboarding completion, workspace, password state, and
   other WebUI preferences.
 
+### Native Supermemory memory provider (optional)
+
+Supermemory augments the local `MEMORY.md`/`USER.md`/`SOUL.md` files through
+the native Hermes memory lifecycle (prefetch, turn capture, session-end
+ingest). WebUI wires the same files the CLI uses for the active profile:
+
+- `config.yaml`: `memory.provider: supermemory` (set via
+  `POST /api/memory/provider {"provider": "supermemory"}`).
+- `$HERMES_HOME/supermemory.json`: `container_tag` (mode `0600`).
+  The default profile keeps legacy `hermes`; every named profile (and any
+  profile under `HERMES_WEBUI_ISOLATED_PROFILE`) uses `hermes:{profile}`.
+- `SUPERMEMORY_API_KEY`: process env or the active profile `.env`.
+  The key is only ever sent server-side as a Bearer header with the singular
+  JSON-body `containerTag`; it is never accepted via the WebUI API, never
+  logged, and never returned in status (only a configured boolean).
+
+Isolation rules: one distinct primary tag per profile, no cross-tag queries,
+and no reuse of one profile's tag for another. Do not set a shared
+`SUPERMEMORY_CONTAINER_TAG` in multi-profile or isolated deployments; it
+would collapse tenants at runtime. Restart or reload the profile after
+changing `.env` so the running process sees the key.
+
 State normally lives outside the repository. By default:
 
 - Hermes Agent state: Windows `%LOCALAPPDATA%\hermes`; POSIX `~/.hermes`

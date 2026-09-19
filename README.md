@@ -296,7 +296,11 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
-- **Memory** -- view and edit MEMORY.md and USER.md inline
+- **Memory** -- view and edit MEMORY.md, USER.md, and SOUL.md inline; native
+  Supermemory provider status (when enabled) is reported alongside local files.
+  Enable with `POST /api/memory/provider {"provider": "supermemory"}` after
+  setting `SUPERMEMORY_API_KEY` in the active profile `.env`. Each profile maps
+  to its own `hermes:{profile}` container tag with strict no-cross-tag isolation.
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar

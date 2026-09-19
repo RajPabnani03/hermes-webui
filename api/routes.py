@@ -14102,6 +14102,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/memory/write":
         return _handle_memory_write(handler, body)
 
+    if parsed.path == "/api/memory/provider":
+        return _handle_memory_provider(handler, body)
+
     if parsed.path in {"/api/gateway/start", "/api/gateway/stop", "/api/gateway/restart"}:
         return _handle_gateway_lifecycle(handler, parsed.path.rsplit("/", 1)[-1], body)
 
@@ -18625,9 +18628,14 @@ def _handle_memory_read(handler, parsed=None):
         else ""
     )
     project_context = _read_active_project_context(_memory_project_context_workspace(parsed))
-    return j(
-        handler,
-        {
+    try:
+        from api.supermemory import get_memory_provider_status as _supermemory_status
+
+        memory_provider = _supermemory_status()
+    except Exception:
+        logger.debug("supermemory status unavailable", exc_info=True)
+        memory_provider = None
+    payload = {
             "memory": _redact_text(memory),
             "user": _redact_text(user),
             "soul": _redact_text(soul),
@@ -18644,7 +18652,12 @@ def _handle_memory_read(handler, parsed=None):
             "project_context_mtime": project_context["mtime"],
             "project_context_shadowed": project_context["shadowed"],
             "external_notes_enabled": _external_notes_sources_enabled(),
-        },
+        }
+    if memory_provider is not None:
+        payload["memory_provider"] = memory_provider
+    return j(
+        handler,
+        payload,
     )
 
 
@@ -23019,6 +23032,43 @@ def _handle_memory_write(handler, body):
             403,
         )
     return j(handler, {"ok": True, "section": section, "path": str(target)})
+
+
+def _handle_memory_provider(handler, body):
+    """Enable the native Supermemory memory provider for the active profile.
+
+    Accepts only ``{"provider": "supermemory"}``. The API key is never
+    accepted here -- it lives in ``SUPERMEMORY_API_KEY`` (process env or the
+    active profile ``.env``) so it is never logged, echoed, or committed.
+    """
+    if not isinstance(body, dict):
+        return bad(handler, "provider is required")
+    for forbidden in ("api_key", "apikey", "key", "supermemory_api_key", "SUPERMEMORY_API_KEY"):
+        if forbidden in body:
+            return bad(handler, "API key must be set via SUPERMEMORY_API_KEY env, not the API")
+    try:
+        provider = str((body or {}).get("provider") or "")
+    except Exception:
+        return bad(handler, "provider is required")
+    if not provider.strip():
+        return bad(handler, "provider is required")
+    try:
+        from api.supermemory import (
+            ensure_profile_scoped_supermemory_config as _ensure_tag,
+            get_memory_provider_status as _status,
+            set_memory_provider as _set_provider,
+        )
+
+        _set_provider(provider)
+        scoped = _ensure_tag()
+        status = _status()
+        status["scoped_config"] = scoped
+    except ValueError as exc:
+        return bad(handler, str(exc))
+    except Exception:
+        logger.exception("memory provider enable failed")
+        return bad(handler, "failed to enable memory provider", 500)
+    return j(handler, {"ok": True, "memory_provider": status})
 
 
 def _normalize_message_for_import_refresh(message: object) -> object:
