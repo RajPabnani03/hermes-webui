@@ -31,6 +31,29 @@ This file tracks UI bugs and polish items. Fixed items are kept for reference.
 
 ## Fixed
 
+### Blank reply after replay reconnect (#7640)
+
+- **Was:** A pending user prompt or historical reply could authorize a replay
+  cursor even though the browser had no live assistant output for that cursor.
+- **Fix:** Restore and direct reattach reset cursor-only caches to replay from
+  zero, retaining the pending prompt. Recoverable live output retains its cursor.
+- **Verification:** `tests/test_issue7640_7625_recovery.py` and
+  `tests/browser_recovery_check.js` cover cursor reset, second reconnect, and
+  visible terminal settlement without reload (`done`, `stream_end`, and cancel).
+
+### Unbounded automatic session refreshes (#7625)
+
+- **Was:** Refresh, terminal/cancel recovery, undo, and retry fetched entire
+  transcripts and legacy tool-call lists. Compression preflight also fetched
+  transcript data just to check session existence.
+- **Fix:** Automatic transcript reads request the existing 30-row tail window
+  and retain tools, offsets, and truncation metadata. Compression preflight is
+  metadata-only. Explicit full-history operations remain supported; the server
+  API default is unchanged. Outline full-history jumps keep their absolute target.
+- **Verification:** Behavioral client tests assert bounded request parameters,
+  preserved history controls, and metadata-only preflight. Synthetic Chromium
+  recovery checks passed at desktop, narrow, and mobile-width viewports.
+
 ### Repeated identical user turns disappearing (#7587)
 
 - **Was:** Content-only identity collapsed distinct repeated prompts or images

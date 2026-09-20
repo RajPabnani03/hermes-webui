@@ -341,8 +341,8 @@ def test_server_runtime_journal_snapshot_restores_structured_inflight_state():
         assert key in helper_block
 
 
-def test_active_reload_keeps_user_only_inflight_visible_until_pending_dedupe():
-    """A just-submitted user row is visible live state before first assistant text.
+def test_active_reload_preserves_user_prompt_without_authorizing_replay_cursor():
+    """A submitted prompt is useful for dedupe, not proof of recovered output.
 
     On an active first-turn reload, the sidecar can still have messages=[] while
     pending_user_message and the submitted turn journal record the same prompt.
@@ -351,8 +351,11 @@ def test_active_reload_keeps_user_only_inflight_visible_until_pending_dedupe():
     """
     result = _run_session_identity_probe()
 
-    assert result["userOnlyInflightVisible"] is True
+    assert result["userOnlyInflightVisible"] is False
     assert result["emptyUserOnlyInflightNotVisible"] is True
+    guard = SESSIONS_SRC.split("if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){", 1)[1].split("\n  }", 1)[0]
+    assert "INFLIGHT[sid].lastRunJournalSeq=0" in guard
+    assert "delete INFLIGHT[sid]" not in guard
 
 
 def test_pending_user_merge_dedupes_user_turn_variants_by_behavior():

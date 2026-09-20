@@ -8155,10 +8155,13 @@ async function refreshSession() {
   if (window._restartingForUpdate) { location.reload(); return; }
   dismissReconnect();
   if (!S.session) return;
+  const sid = S.session.session_id;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
+    if (!data || !data.session || !S.session || S.session.session_id !== sid) return;
     S.session = data.session;
     S.messages = data.session.messages || [];
+    S.toolCalls = data.session.tool_calls || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     const pendingMsg=getPendingSessionMessage(data.session,S.messages);

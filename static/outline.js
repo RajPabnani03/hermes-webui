@@ -103,20 +103,25 @@ function _jumpToMessage(rawIdx) {
     return;
   }
 
-  // Row is outside the render window — reload the full session and retry.
+  // Row is outside the render window. This is an intentional full-history
+  // operation: preserve the target's absolute index when replacing a tail.
   if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
+  const absoluteIdx = rawIdx + (typeof _oldestIdx !== 'undefined' ? _oldestIdx : 0);
   api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0&msg_limit=9999')
+      '&messages=1&resolve_model=0')
     .then(function(data) {
       if (!data || !data.session) return;
       if (!S.session || S.session.session_id !== sid) return;  // session switched
       S.messages = data.session.messages || [];                // populate S
+      if (typeof _messagesTruncated !== 'undefined') _messagesTruncated = !!data.session._messages_truncated;
+      if (typeof _oldestIdx !== 'undefined') _oldestIdx = data.session._messages_offset || 0;
+      if (typeof _syncToolCallsForLoadedMessages === 'function') _syncToolCallsForLoadedMessages(S.messages, data.session.tool_calls);
       _expandOutlineRenderWindow();
       if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
       window.setTimeout(function() {
         if (!S.session || S.session.session_id !== sid) return;
-        const r = document.getElementById('msg-user-' + rawIdx);
+        const r = document.getElementById('msg-user-' + absoluteIdx);
         if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
       }, 120);
     })

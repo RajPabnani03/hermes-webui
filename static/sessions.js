@@ -695,11 +695,18 @@ function _inflightHasVisibleLiveState(inflight) {
   if (String(inflight.liveTurnHtml || '').trim()) return true;
   if (Array.isArray(inflight.toolCalls) && inflight.toolCalls.length) return true;
   if (Array.isArray(inflight.activityBurstAnchors) && inflight.activityBurstAnchors.length) return true;
+  const scene = inflight.anchorActivityScene;
+  if (scene && (String(scene.final_answer || '').trim() ||
+      (Array.isArray(scene.activity_rows) && scene.activity_rows.some(row =>
+        row && (String(row.text || '').trim() || row.tool))))) return true;
   if (Array.isArray(inflight.messages)) {
     return inflight.messages.some((msg) => {
       if (!msg) return false;
-      if (msg.role === 'user') return Boolean(_messageComparableText(msg));
       if (msg.role !== 'assistant') return false;
+      // Historical replies and the pending user prompt cannot justify skipping
+      // this run's journal. Only recoverable live output owns a replay cursor.
+      if (!msg._live) return false;
+      if (String(msg.reasoning || '').trim()) return true;
       const content = msg.content;
       if (typeof content === 'string') return content.trim();
       if (Array.isArray(content)) return content.length > 0;
@@ -1549,10 +1556,9 @@ async function loadSession(sid){
   }
 
   if(activeStreamId&&INFLIGHT[sid]&&!_inflightHasVisibleLiveState(INFLIGHT[sid])){
-    // A stale cursor-only INFLIGHT entry is worse than no cache: replay would
-    // resume after lastRunJournalSeq while the pane has no prose/tool DOM to
-    // preserve, making a session switch look like the live turn vanished.
-    delete INFLIGHT[sid];
+    // The prompt remains useful for pending-message dedupe, but it cannot
+    // justify skipping journal output. Keep it while invalidating the cursor.
+    INFLIGHT[sid].lastRunJournalSeq=0;
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
 

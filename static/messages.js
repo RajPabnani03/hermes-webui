@@ -1931,6 +1931,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   _suspendSessionStreamForLiveChat(activeSid);
 
+  // Recovery can attach directly, without passing through loadSession's cache
+  // validation. A cursor backed only by a user prompt must replay from zero.
+  if(reconnecting&&INFLIGHT[activeSid]&&typeof _inflightHasVisibleLiveState==='function'&&
+      !_inflightHasVisibleLiveState(INFLIGHT[activeSid])){
+    INFLIGHT[activeSid].lastRunJournalSeq=0;
+    if(typeof clearInflightState==='function') clearInflightState(activeSid);
+  }
+
   // On reconnect, restore accumulated text from INFLIGHT so we don't lose
   // progress made before the session switch. Without this the closure starts
   // empty and tokens arriving on the new SSE connection append to nothing —
@@ -5672,6 +5680,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         clearLiveToolCards();if(!assistantText)removeThinking();
         _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
@@ -5690,7 +5700,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fetch latest session from server to get accurate message list (includes cancel status)
           // This ensures messages stay in sync with server, fixing race condition where local
           // "*Task cancelled.*" message gets lost when done event overwrites S.messages
-          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
           // Fallback to local cancel message if API fails
@@ -5770,7 +5780,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return returnStatus?'stale':false;
     }
     try{
-      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
@@ -5822,6 +5832,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_stagedMessages.length)]
           : _stagedMessages;
         S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         if(S.session&&S.session.session_id){

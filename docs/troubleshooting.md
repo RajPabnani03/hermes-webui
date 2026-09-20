@@ -121,6 +121,41 @@ The on-disk locations below assume the default `~/.hermes/webui` state directory
 
 ---
 
+## Replay reconnect shows no assistant text
+
+**Symptom.** After a browser transport drop, the user prompt returns but the
+assistant reply is missing, especially in Transparent Stream mode.
+
+**Recovery invariant.** Browser `INFLIGHT` is a cache, not transcript authority.
+A pending user prompt or an older settled reply cannot authorize a nonzero
+run-journal replay cursor. Session restore and direct stream reattach discard
+that cursor unless the cache contains recoverable live assistant output, tools,
+or an activity scene. A second reconnect with recovered output keeps its cursor
+to avoid duplicating the reply. Terminal recovery renders the canonical session
+tail even when replay delivers `stream_end` without `done`.
+
+**Long sessions.** Automatic refresh, terminal recovery, cancel synchronization,
+undo, and retry request a 30-row tail, preserving the server's truncation flag
+and absolute message offset so **Load earlier messages** remains available.
+Compression's existence check requests metadata only and leaves the visible
+transcript untouched. Explicit full-history operations (load-all, outline jumps,
+and preserving an already fully loaded transcript on reload) still use the
+existing full-transcript API contract. The server default is unchanged.
+
+**Verification.** `./scripts/test.sh tests/test_issue7640_7625_recovery.py -q`
+executes the client functions with controlled HTTP responses. For the real DOM
+and stream handlers, open an isolated agent-free WebUI in Chromium and run
+`agent-browser eval --stdin < tests/browser_recovery_check.js`. The browser check
+uses synthetic HTTP/SSE boundaries, a cursor-only cache, two attachments, and
+terminal settlement. It checks visible answer text, absence of duplicates,
+bounded recovery requests, and pagination. Repeat with
+`window.recoveryTerminalEvent = 'done'` and `'cancel'` to cover those terminal
+paths. Never run this state-replacing fixture in a real user conversation.
+
+**When to file a bug.** If replay still leaves a blank reply, record the display
+mode, replay cursor, terminal event type, and whether the canonical tail contains
+an assistant answer. Do not share unredacted session contents or credentials.
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.
