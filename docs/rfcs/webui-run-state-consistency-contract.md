@@ -65,6 +65,13 @@ while WebUI still has multiple overlapping state stores.
    prompt and WebUI asks the model to continue that work, the prompt must be in
    the reconstructed model context unless WebUI shows an explicit reason it was
    excluded.
+   Sidecar/state.db reconciliation must distinguish repeated user occurrences
+   (#7587). Content equality alone is not proof of a mirrored user turn: dedup
+   requires matching finite timestamps and agreement of `id`, `message_id`, and
+   `_state_db_row_id`, including their absence. Missing, invalid, or different
+   occurrence metadata preserves both rows. This supersedes legacy content-only
+   or same-second user dedup; ambiguous historical mirrors may appear twice
+   rather than deleting real input. Assistant/tool reconciliation is unchanged.
 2. **Active turn UI keeps its owner.** The user turn that started active work
    must remain visible before assistant text, thinking cards, tool cards, or
    activity groups that belong to that work.

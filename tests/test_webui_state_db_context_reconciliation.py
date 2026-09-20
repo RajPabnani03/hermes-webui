@@ -152,6 +152,7 @@ def test_state_db_delta_after_context_allows_recovered_turn_prefix():
             "role": "user",
             "content": "alright gateway restarted, lets give it a live test...",
             "_recovered": True,
+            "timestamp": 1.0,
         },
         {
             "role": "assistant",

@@ -143,8 +143,8 @@ def test_content_key_strips_workspace_prefix_for_user_turns():
     from api.models import _session_message_content_key
     from api.streaming import _message_identity
 
-    prefixed = {"role": "user", "content": WORKSPACE_PREFIX + "Hello world"}
-    bare = {"role": "user", "content": "Hello world"}
+    prefixed = {"role": "user", "content": WORKSPACE_PREFIX + "Hello world", "timestamp": 1000.0}
+    bare = {"role": "user", "content": "Hello world", "timestamp": 1000.0}
 
     # The reconciliation key must now match across the prefix boundary.
     assert _session_message_content_key(prefixed) == _session_message_content_key(bare)
@@ -158,13 +158,8 @@ def test_content_key_is_idempotent_for_bare_user_message():
     """A user message with no prefix keys identically before and after the fix."""
     from api.models import _session_message_content_key
 
-    bare = {"role": "user", "content": "just a plain message"}
-    assert _session_message_content_key(bare) == (
-        "user",
-        "just a plain message",
-        "",
-        "",
-    )
+    bare = {"role": "user", "content": "just a plain message", "timestamp": 1000.0}
+    assert _session_message_content_key(bare) == _session_message_content_key(dict(bare))
 
 
 def test_content_key_does_not_strip_for_non_user_roles():

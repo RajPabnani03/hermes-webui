@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -6209,6 +6210,7 @@ def get_state_db_session_message_keys_before_timestamp(
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
+                    timestamp,
                     tool_calls
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
@@ -6221,6 +6223,7 @@ def get_state_db_session_message_keys_before_timestamp(
                     {
                         "role": row["role"],
                         "content": row["content"],
+                        "timestamp": row["timestamp"],
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                     }
                 )
@@ -6297,14 +6300,32 @@ def _message_timestamp_as_float(msg):
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        timestamp = float(value)
+        return timestamp if math.isfinite(timestamp) else None
     except (TypeError, ValueError):
         return None
+
+
+def _user_message_occurrence_key(msg: dict):
+    """Require an exact timestamp and agreement of every private identity.
+
+    Unknown timestamps cannot prove an occurrence, even when content or IDs
+    agree. A fresh token deliberately makes such keys non-deduplicating.
+    """
+    timestamp = _message_timestamp_as_float(msg)
+    if timestamp is None:
+        return (object(),)
+    return (timestamp,) + tuple(
+        str(msg.get(name)) if msg.get(name) not in (None, "") else ""
+        for name in ("id", "message_id", "_state_db_row_id")
+    )
 
 
 def _session_message_merge_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
+    if msg.get("role") == "user":
+        return ("user_occurrence", _session_message_content_key(msg))
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
         return ("message_id", str(message_identity))
@@ -6380,6 +6401,8 @@ def _session_message_dedup_key(msg: dict):
     """
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
+    if msg.get("role") == "user":
+        return ("user_occurrence", _session_message_content_key(msg))
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
         return ("message_id", str(message_identity))
@@ -6439,12 +6462,14 @@ def _session_message_content_key(msg: dict):
         content,
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
-    )
+    ) + ((_user_message_occurrence_key(msg),) if role == "user" else ())
 
 
 def _session_message_visible_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
+    if msg.get("role") == "user":
+        return _session_message_content_key(msg)
     # Include tool_calls so assistant messages that invoke different tools
     # (but share identical empty content) are not collapsed by sidecar
     # prefix matching.  Without this, all tool-calling messages map to
@@ -6476,9 +6501,11 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
+    role = visible_key[0]
+    if role == "user" and (len(visible_key) != 5 or len(visible_key[-1]) != 4):
+        return None
     if visible_key in visible_keys:
         return visible_key
-    role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""
     if not content:
         return None
@@ -6490,6 +6517,10 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
         existing_role = existing_key[0]
         existing_content = existing_key[1] if len(existing_key) > 1 else ""
         if role != existing_role or not existing_content:
+            continue
+        # Fuzzy content is useful for mirrored display wrappers, but only after
+        # exact occurrence metadata establishes that this is the same user turn.
+        if role == "user" and visible_key[2:] != existing_key[2:]:
             continue
         # Exact visible-key equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token
@@ -6557,9 +6588,10 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     """Return only state.db rows that are newer than model-facing context.
 
     `context_messages` is the authoritative model-facing prefix. state.db may
-    contain a mirrored copy of that prefix with fresh timestamps, especially for
-    LCM/continuation sessions. Appending the whole state transcript to a clean
-    sidecar context replays old context into the next runtime prompt.
+    contain a mirrored copy of that prefix. Appending the whole state transcript
+    to a clean sidecar context replays old context into the next runtime prompt.
+    User mirrors require exact occurrence metadata: missing or changed timestamps
+    and identities preserve the row rather than silently deleting repeated input.
     """
     sidecar_context = list(sidecar_context or [])
     state_messages = list(state_messages or [])
@@ -6608,6 +6640,10 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
         if state_keys[state_index] == sidecar_keys[sidecar_index]:
             sidecar_index += 1
+        elif state_keys[state_index][0] == "user":
+            # Do not scan past an unrepresented user occurrence to find a later
+            # assistant mirror: slicing that prefix would delete real input.
+            return state_messages[best_len:]
         state_index += 1
     if sidecar_index == len(sidecar_keys):
         return state_messages[state_index:]
@@ -7095,13 +7131,9 @@ def merge_session_messages_append_only(
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
         # preserves sidecar-only ordering/metadata for equal timestamps and
-        # prevents duplicate legacy rows when timestamp precision differs
-        # between stores. State rows whose visible content already exists in
-        # the sidecar are also skipped even if state.db restamped them later
-        # during compaction/recovery; otherwise old prompts can be appended
-        # after the assistant tail and make /api/session look like the answer
-        # vanished. Explicit message ids are authoritative for distinct rows
-        # only when their visible content is not already present.
+        # prevents duplicate legacy assistant/tool rows when timestamp precision
+        # differs between stores. User rows instead require occurrence-sensitive
+        # content identity; unmatched users are inserted chronologically below.
         if (
             key[0] != "message_id"
             and max_sidecar_timestamp is not None

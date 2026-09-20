@@ -1100,7 +1100,29 @@ def test_state_db_reconciliation_dedupes_numeric_equivalent_timestamps(monkeypat
     assert handler.response_json["session"]["message_count"] == 1
 
 
-def test_state_db_reconciliation_dedupes_same_second_state_rows(monkeypatch, tmp_path):
+@pytest.mark.parametrize("content", ["try again", json.dumps([{"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 210_000}}])])
+@pytest.mark.parametrize("include_mirror", [False, True])
+def test_state_db_restore_preserves_repeated_user_turn(monkeypatch, tmp_path, content, include_mirror):
+    import api.models as models
+    import api.routes as routes
+
+    sid = "webui_repeated_occurrences"
+    first = {"role": "user", "content": content, "timestamp": 1000.0}
+    later = dict(first, timestamp=2000.0)
+    _install_test_session(monkeypatch, tmp_path, sid, [first])
+    _make_state_db(tmp_path / "state.db", sid, [first, later] if include_mirror else [later])
+    models.SESSIONS.clear()  # Exercise restore from persisted sidecar + SQLite.
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    users = [m for m in handler.response_json["session"]["messages"] if m["role"] == "user"]
+    assert [m["timestamp"] for m in users] == [1000.0, 2000.0]
+    assert [m["content"] for m in users] == [content, content]
+
+
+def test_state_db_reconciliation_preserves_ambiguous_same_second_user(monkeypatch, tmp_path):
     import api.routes as routes
 
     sid = "webui_reconcile_fractional_state_timestamp"
@@ -1126,9 +1148,11 @@ def test_state_db_reconciliation_dedupes_same_second_state_rows(monkeypatch, tmp
     routes.handle_get(handler, urlparse(handler.path))
     assert handler.status == 200
     session = handler.response_json["session"]
-    assert [m["role"] for m in session["messages"]] == ["user", "assistant"]
-    assert [m["content"] for m in session["messages"]] == ["hi", "Hi there"]
-    assert session["message_count"] == 2
+    # #7587: a fractional timestamp is a distinct user occurrence, not proof
+    # of sidecar/state.db write drift. Assistant replay policy is unchanged.
+    assert [m["role"] for m in session["messages"]] == ["user", "assistant", "user"]
+    assert [m["content"] for m in session["messages"]] == ["hi", "Hi there", "hi"]
+    assert session["message_count"] == 3
 
 
 def test_state_db_reconciliation_preserves_same_second_state_repeats(monkeypatch, tmp_path):

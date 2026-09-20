@@ -381,7 +381,7 @@ def test_non_adjacent_replayed_context_block_is_not_appended_again():
 def test_prefer_context_reconcile_strips_state_db_mirrored_prefix():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
-        {"role": "user", "content": "[Session Arc Summary]"},
+        {"role": "user", "content": "[Session Arc Summary]", "timestamp": 101.0},
         {"role": "assistant", "content": "old answer"},
         {"role": "user", "content": "latest saved question", "timestamp": 200.0},
         {"role": "assistant", "content": "latest saved answer", "timestamp": 201.0},
@@ -591,7 +591,7 @@ def test_prefer_context_reconcile_fails_closed_when_compression_anchor_ts_is_mis
 
 def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
     sidecar_context = [
-        {"role": "user", "content": "[Session Arc Summary] compacted"},
+        {"role": "user", "content": "[Session Arc Summary] compacted", "timestamp": 100.0},
         {"role": "assistant", "content": "last compacted answer"},
     ]
     state_messages = [
@@ -614,7 +614,7 @@ def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
     ]
 
 
-def test_prefer_context_reconcile_strips_mirrored_rows_without_sidecar_timestamps():
+def test_prefer_context_reconcile_preserves_ambiguous_users_without_sidecar_timestamps():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
         {"role": "user", "content": "summary"},
@@ -639,6 +639,8 @@ def test_prefer_context_reconcile_strips_mirrored_rows_without_sidecar_timestamp
     )
 
     assert reconciled == sidecar_context + [
+        {"role": "user", "content": "summary", "timestamp": 101.0},
+        {"role": "user", "content": "already saved", "timestamp": 500.0},
         {"role": "user", "content": "new after sidecar", "timestamp": 600.0},
     ]
 
@@ -646,7 +648,7 @@ def test_prefer_context_reconcile_strips_mirrored_rows_without_sidecar_timestamp
 def test_prefer_context_reconcile_starts_after_last_state_row_seen_in_context():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
-        {"role": "user", "content": "summary"},
+        {"role": "user", "content": "summary", "timestamp": 101.0},
         {"role": "assistant", "content": "old answer"},
         {"role": "assistant", "content": "later represented row"},
     ]
@@ -676,7 +678,7 @@ def test_prefer_context_reconcile_starts_after_last_state_row_seen_in_context():
 
 def test_state_db_delta_preserves_fresh_rows_before_repeated_context_message():
     sidecar_context = [
-        {"role": "user", "content": "ok"},
+        {"role": "user", "content": "ok", "timestamp": 1.0},
         {"role": "assistant", "content": "ready"},
     ]
     state_messages = [

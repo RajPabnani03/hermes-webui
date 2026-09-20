@@ -3,11 +3,15 @@ deduplicate legacy state messages (messages without explicit id/message_id).
 
 Three repro rows from the bug report:
 
-  Row A — Gap 1: empty sidecar, duplicate state (no timestamps)
+  Row A — Gap 1: empty sidecar, duplicate state (exact timestamps)
   Row B — Gap 2: non-empty sidecar, duplicate legacy state
-  Row C — Gap 2 (replay variant): sidecar has explicit id, state has
-          two copies of the same legacy message; first is consumed by
+  Row C — Gap 2 (replay variant): sidecar and state have matching identities,
+          with two copies of the same message; first is consumed by
           the replay-prefix branch, second must still be deduped.
+
+#7587 tightens user dedup: content alone cannot prove an occurrence. These
+fixtures supply matching timestamps/IDs; ambiguous occurrences have dedicated
+coverage in test_issue7587_repeated_user_turns.py.
 """
 from __future__ import annotations
 
@@ -35,8 +39,8 @@ def _identified(role: str, content: str, msg_id: str, timestamp=None) -> dict:
 @pytest.mark.parametrize("use_watermark", [False, True])
 def test_empty_sidecar_deduplicates_identical_legacy_state(use_watermark):
     """Empty sidecar with duplicate state rows must return a single message."""
-    a = _legacy("user", "hello")
-    state = [a, a]  # true duplicate — same role, content, no timestamp
+    a = _legacy("user", "hello", timestamp=1000.0)
+    state = [a, a]  # true duplicate — same role, content, exact timestamp
     watermark = "2030-01-01T00:00:00Z" if use_watermark else None
     result = merge_session_messages_append_only([], state, truncation_watermark=watermark)
     assert len(result) == 1, f"expected 1 (deduped), got {len(result)}"
@@ -48,7 +52,7 @@ def test_empty_sidecar_deduplicates_identical_legacy_state(use_watermark):
 def test_nonempty_sidecar_deduplicates_identical_legacy_state():
     """Non-empty sidecar: duplicate legacy state rows must not both appear."""
     sidecar = [_identified("system", "sys", msg_id="s1")]
-    a = _legacy("user", "hello")
+    a = _legacy("user", "hello", timestamp=1000.0)
     state = [a, a]
     result = merge_session_messages_append_only(sidecar, state)
     contents = [m["content"] for m in result]
@@ -62,8 +66,8 @@ def test_replay_then_legacy_dup_is_deduped():
     First state 'a' is consumed by the replay-prefix branch; second must be
     caught by the dedup guard rather than appended.
     """
-    sidecar = [_identified("user", "hello", msg_id="a")]
-    a = _legacy("user", "hello")
+    sidecar = [_identified("user", "hello", msg_id="a", timestamp=1000.0)]
+    a = dict(sidecar[0])
     state = [a, a]
     result = merge_session_messages_append_only(sidecar, state)
     assert len(result) == 1, f"expected 1, got {len(result)}: {result}"

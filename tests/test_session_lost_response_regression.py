@@ -138,10 +138,9 @@ def _assert_retry_meta_removed(marker):
 def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
     """State rows replaying an already-visible prefix must not append after the tail.
 
-    Production shape: a compressed/tip sidecar can persist messages with
-    second-level timestamps while state.db stores the same early rows with
-    sub-second floats. The merge must preserve the sidecar assistant tail;
-    otherwise /api/session returns a transcript ending on an old user prompt.
+    Assistant/tool mirrors may carry fresh float timestamps, but #7587 requires
+    exact occurrence timestamps for user mirrors. Proven prefix replays must
+    preserve the sidecar assistant tail.
     """
     sidecar_messages = [
         {"role": "user", "content": "plan", "timestamp": 1779309765},
@@ -166,7 +165,7 @@ def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
         },
     ]
     state_prefix = [
-        {"role": "user", "content": "plan", "timestamp": 1779344917.2780898},
+        {"role": "user", "content": "plan", "timestamp": 1779309765},
         {"role": "assistant", "content": "loaded plan", "timestamp": 1779344917.285758},
         {"role": "tool", "content": "skill output", "timestamp": 1779344917.2926793},
         {"role": "assistant", "content": "answer before compaction", "timestamp": 1779344917.3077576},
@@ -176,7 +175,7 @@ def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
                 "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into "
                 "the summary below. This is a handoff from a previous context window."
             ),
-            "timestamp": 1779344917.299318,
+            "timestamp": 1779309765,
         },
         {
             "role": "tool",
@@ -187,7 +186,7 @@ def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
         {
             "role": "user",
             "content": "[Workspace::v1: /tmp/project-workspace]\nnoch weitere prs?",
-            "timestamp": 1779344917.3287876,
+            "timestamp": 1779309765,
         },
     ]
 
@@ -203,7 +202,7 @@ def test_state_db_full_replay_does_not_append_after_sidecar_tail():
 
     Regression for a display merge where the sidecar already ends on the real
     assistant answer, but state.db replays the same visible turn sequence with
-    newer float timestamps.
+    newer assistant timestamps but exact user occurrence timestamps (#7587).
     """
     sidecar_messages = [
         {"role": "user", "content": "initial critique", "timestamp": 100},
@@ -212,12 +211,12 @@ def test_state_db_full_replay_does_not_append_after_sidecar_tail():
         {"role": "assistant", "content": "opened browser preview", "timestamp": 100},
     ]
     state_replay = [
-        {"role": "user", "content": "initial critique", "timestamp": 100.1},
+        {"role": "user", "content": "initial critique", "timestamp": 100},
         {"role": "assistant", "content": "analysis", "timestamp": 100.2},
         {
             "role": "user",
             "content": "[Workspace::v1: /tmp/project-workspace]\nErstelle deine Version",
-            "timestamp": 100.3,
+            "timestamp": 100,
         },
         {"role": "assistant", "content": "opened browser preview", "timestamp": 100.4},
     ]
@@ -421,7 +420,7 @@ def test_state_db_middle_segment_replay_does_not_append_after_sidecar_tail():
         {
             "role": "user",
             "content": "[Workspace::v1: /tmp/project-workspace]\nErstelle deine Version",
-            "timestamp": 100.2,
+            "timestamp": 100,
         },
     ]
 

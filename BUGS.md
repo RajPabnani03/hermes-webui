@@ -31,6 +31,19 @@ This file tracks UI bugs and polish items. Fixed items are kept for reference.
 
 ## Fixed
 
+### Repeated identical user turns disappearing (#7587)
+
+- **Was:** Content-only identity collapsed distinct repeated prompts or images
+  during sidecar/state.db restore and next-turn context reconstruction.
+- **Fix:** User dedup now requires matching finite timestamps and private
+  identities. Ambiguous occurrences are preserved; exact mirrors still dedup.
+  Bounded prefix reads carry timestamps, and context alignment does not skip
+  an unmatched user turn to find a later assistant mirror.
+- **Tradeoff:** Historical mirrors without matching occurrence metadata may
+  appear twice. Preserving input takes precedence over speculative suppression.
+- **Verification:** `tests/test_issue7587_repeated_user_turns.py` and HTTP
+  restore coverage in `tests/test_webui_state_db_reconciliation.py`.
+
 ### Provider inherited across model changes — prevention for #7585
 
 - **Was:** A model-only update or chat request retained the old model's
