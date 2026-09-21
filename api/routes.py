@@ -7085,6 +7085,194 @@ def _requested_session_model_provider(body: dict, session) -> str | None:
     return getattr(session, "model_provider", None)
 
 
+PROVIDER_REPAIR_SUGGEST_THRESHOLD = 0.7
+
+
+def _get_typesafe_client():
+    """Return a TypeSafe client, or None when Jev suggestions are unavailable.
+
+    The import is lazy so the server boots without typesafe-sdk installed.
+    Every failure mode degrades to "no suggestion" so a Jev outage can
+    never block chat or session updates.
+    """
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        return None
+    try:
+        from typesafe_sdk import TypeSafeClient
+    except ImportError:
+        return None
+    try:
+        return TypeSafeClient()
+    except Exception:
+        logger.warning("typesafe client init failed", exc_info=True)
+        return None
+
+
+def _bare_model_id(model):
+    """Last-segment model id, used to match bare session models to catalog entries."""
+    text = str(model or "").strip()
+    if text.startswith("@") and ":" in text:
+        text = text.split(":", 1)[1]
+    return text.rsplit("/", 1)[-1].strip().lower()
+
+
+def _provider_candidates_for_model(model_id, catalog=None):
+    """Provider ids whose catalog group lists ``model_id``.
+
+    Exact entry-id matches come first, then entries sharing the bare last
+    segment (a session saved as ``gpt-4`` matches catalog entries
+    ``openai/gpt-4`` and ``gpt-4``). Returns unique ids in match order.
+    Reads the cached catalog only — a suggestion must never trigger a live
+    provider rebuild.
+    """
+    model = str(model_id or "").strip()
+    if not model:
+        return []
+    try:
+        groups = (catalog if catalog is not None else get_available_models(prefer_cache=True)).get("groups") or []
+    except Exception:
+        logger.warning("provider candidate catalog read failed", exc_info=True)
+        return []
+    bare = _bare_model_id(model)
+    exact, fuzzy = [], []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        pid = str(group.get("provider_id") or group.get("provider") or "").strip()
+        if not pid:
+            continue
+        for entry in group.get("models") or []:
+            if isinstance(entry, dict):
+                entry_id = str(entry.get("id") or "").strip()
+            else:
+                entry_id = str(entry or "").strip()
+            if not entry_id:
+                continue
+            if entry_id.lower() == model.lower():
+                if pid not in exact:
+                    exact.append(pid)
+            elif bare and _bare_model_id(entry_id) == bare:
+                if pid not in fuzzy and pid not in exact:
+                    fuzzy.append(pid)
+    return exact + fuzzy
+
+
+def _judge_intended_provider(model, stored_provider, profile_provider, profile_default, candidates):
+    """Ask Jev which candidate provider the session intended. Never raises.
+
+    Returns {"provider", "confidence"} or None when Jev is unavailable,
+    the call fails, or the judgment falls outside the candidate set.
+    """
+    client = _get_typesafe_client()
+    if client is None:
+        return None
+    try:
+        from typesafe_sdk import Choice
+    except ImportError:
+        return None
+    descriptions = {}
+    for pid in candidates:
+        notes = []
+        if profile_provider and pid == profile_provider:
+            notes.append("the profile's active provider")
+        if stored_provider and pid == stored_provider:
+            notes.append("previously selected for this session")
+        if str(pid).startswith("custom:"):
+            notes.append("a configured custom endpoint")
+        descriptions[pid] = "; ".join(notes) if notes else "lists this model in the catalog"
+    state = {
+        "session": {"model": model, "stored_provider": stored_provider},
+        "profile": {"active_provider": profile_provider, "default_model": profile_default},
+        "candidates": [{"provider": pid, "evidence": descriptions[pid]} for pid in candidates],
+    }
+    try:
+        with client:
+            response = client.system_one(
+                state=state,
+                questions={
+                    "intended_provider": Choice(
+                        instructions=(
+                            "Which provider should serve model '%s' for this historical "
+                            "session? Prefer the profile's active provider and any "
+                            "previously selected provider; choose only from the "
+                            "listed candidates." % model
+                        ),
+                        criteria=descriptions,
+                    ),
+                },
+            )
+        answer = response.answers["intended_provider"]
+        choice = getattr(answer, "choice", None)
+        if choice not in candidates:
+            logger.warning("typesafe provider judgment outside candidates: %r", choice)
+            return None
+        return {"provider": choice, "confidence": float(getattr(answer, "confidence", 0.0) or 0.0)}
+    except Exception:
+        logger.warning("typesafe provider judgment failed", exc_info=True)
+        return None
+
+
+def _suggest_session_provider(session):
+    """Suggest a provider repair for an ambiguous saved model/provider pair.
+
+    Read-only: never mutates the session. Explicit selections that still
+    resolve against the catalog need no repair. ``method`` is one of:
+    already-explicit, sole-candidate, jev-choice, unrepairable, unavailable.
+    """
+    model = str(getattr(session, "model", "") or "").strip()
+    stored = _clean_session_model_provider(getattr(session, "model_provider", None))
+    base = {
+        "model": model,
+        "stored_provider": stored,
+        "candidates": [],
+        "suggested_provider": None,
+        "confidence": None,
+        "uncertain": False,
+        "method": "unavailable",
+        "reason": "",
+    }
+    if not model:
+        base.update(method="unrepairable", reason="Session has no saved model.")
+        return base
+    try:
+        profile_provider, profile_default, _pcfg = _read_profile_model_config(session, None)
+    except Exception:
+        logger.warning("provider suggestion profile read failed", exc_info=True)
+        profile_provider, profile_default = None, None
+    candidates = _provider_candidates_for_model(model)
+    base["candidates"] = candidates
+    if stored and stored in candidates:
+        base.update(method="already-explicit", reason="Stored provider still serves this model.")
+        return base
+    if not candidates:
+        base.update(method="unrepairable", reason="No catalog provider lists this model.")
+        return base
+    if len(candidates) == 1:
+        base.update(
+            method="sole-candidate",
+            suggested_provider=candidates[0],
+            confidence=1.0,
+            reason="Only %s lists this model." % candidates[0],
+        )
+        return base
+    judgment = _judge_intended_provider(model, stored, profile_provider, profile_default, candidates)
+    if judgment is None:
+        reason = "Provider judgment unavailable (no API key or request failed)."
+        if stored:
+            reason = "Stored provider %r no longer lists this model. %s" % (stored, reason)
+        base.update(method="unavailable", reason=reason)
+        return base
+    base.update(
+        method="jev-choice",
+        suggested_provider=judgment["provider"],
+        confidence=judgment["confidence"],
+        uncertain=judgment["confidence"] < PROVIDER_REPAIR_SUGGEST_THRESHOLD,
+        reason="Jev judgment over %d candidates (confidence %.2f)." % (
+            len(candidates), judgment["confidence"]),
+    )
+    return base
+
+
 def _lookup_gateway_session_identity(session_id: str) -> dict:
     if not session_id:
         return {}
@@ -13523,6 +13711,22 @@ def handle_post(handler, parsed) -> bool:
                 logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
+    if parsed.path == "/api/session/provider-suggestion":
+        # Read-only #7585 repair advisor: suggest a provider for an ambiguous
+        # saved model/provider pair. Never mutates the session; applying a
+        # suggestion goes through /api/session/update with an explicit
+        # model_provider, which is already authoritative.
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            s = _get_or_materialize_session(body["session_id"])
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
+        return j(handler, {"suggestion": _suggest_session_provider(s)})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
         if not sid or not isinstance(sid, str) or not sid.strip():

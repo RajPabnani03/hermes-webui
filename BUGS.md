@@ -6,14 +6,7 @@ This file tracks UI bugs and polish items. Fixed items are kept for reference.
 
 ## Open Bugs
 
-- **Historical ambiguous provider pins (#7585)** — Model changes no longer
-  inherit the previous model's provider when the request omits a provider.
-  Already-saved unqualified model/provider pairs cannot always be repaired
-  automatically: the same model can legitimately be served by Nous, OpenRouter,
-  or a custom endpoint, and a missing catalog entry is not proof of ownership.
-  Re-select the intended model **and provider** in the model picker to correct
-  an affected session. Existing explicit selections remain authoritative; this
-  avoids silently changing billing providers based on partial discovery results.
+(none — #7585 advisor shipped, see Fixed below)
 
 ---
 
@@ -30,6 +23,27 @@ This file tracks UI bugs and polish items. Fixed items are kept for reference.
 ---
 
 ## Fixed
+
+### Historical ambiguous provider pins (#7585) — repair advisor
+
+- **Was:** Already-saved unqualified model/provider pairs could not always be
+  repaired automatically: the same model can legitimately be served by Nous,
+  OpenRouter, or a custom endpoint, and a missing catalog entry is not proof
+  of ownership. The only fix was manual re-selection in the model picker.
+- **Fix:** Opening the model picker on a session with a model but no provider
+  fetches a read-only suggestion from `POST /api/session/provider-suggestion`
+  and shows a one-click Apply banner. A sole catalog candidate is suggested
+  deterministically; genuine multi-provider ambiguity goes to a Jev `Choice`
+  judgment over session/profile/catalog evidence, labelled "please confirm"
+  below 0.70 confidence. No API key or a Jev failure degrades to the previous
+  manual flow — chat is never blocked. Apply reuses the existing explicit
+  `model_provider` update path, so nothing is ever silently re-pinned and
+  existing explicit selections remain authoritative.
+- **Verification:** `tests/test_issue7585_provider_repair_advisor.py`
+  (sole/multi-candidate, low-confidence flag, no-key/API-error/out-of-set
+  degradation, endpoint read-only) plus a live Jev run through
+  `_suggest_session_provider`; existing
+  `tests/test_issue7585_stale_model_provider.py` unmodified and green.
 
 ### Blank reply after replay reconnect (#7640)
 

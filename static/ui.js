@@ -3580,6 +3580,7 @@ async function toggleModelDropdown(){
   dd.classList.add('open');
   _positionModelDropdown();
   chip.classList.add('active');
+  if(typeof _maybeFetchProviderSuggestion==='function') _maybeFetchProviderSuggestion();
   const mobileAction=$('composerMobileModelAction');
   if(mobileAction) mobileAction.classList.add('active');
 }
@@ -3591,6 +3592,113 @@ function closeModelDropdown(){
   if(dd) dd.classList.remove('open');
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
+}
+
+// ── #7585 provider repair suggestion banner ─────────────────────────────
+// Shown at the top of the model dropdown when the loaded session has a
+// model but no provider (an ambiguous historical pin). The suggestion comes
+// from POST /api/session/provider-suggestion (sole catalog candidate or a
+// Jev judgment); Apply reuses _persistSessionModelCorrection so the
+// explicit pair flows through the normal authoritative update path.
+let _providerSuggestionCache={};
+let _providerSuggestionDismissed={};
+
+function _providerSuggestionKey(){
+  const s=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+  if(!s||!(s.session_id||s.id)||!s.model||s.model_provider) return null;
+  return String(s.session_id||s.id)+'|'+String(s.model);
+}
+
+function _removeProviderSuggestionBanner(){
+  const old=document.getElementById('providerSuggestionBanner');
+  if(old&&old.parentNode) old.parentNode.removeChild(old);
+}
+
+function _maybeFetchProviderSuggestion(){
+  const dd=$('composerModelDropdown');
+  if(!dd||!dd.classList.contains('open')) return;
+  const key=_providerSuggestionKey();
+  _removeProviderSuggestionBanner();
+  if(!key) return;
+  if(_providerSuggestionDismissed[key]) return;
+  if(Object.prototype.hasOwnProperty.call(_providerSuggestionCache,key)){
+    const cached=_providerSuggestionCache[key];
+    if(cached&&cached.suggested_provider) _renderProviderSuggestionBanner(dd,cached);
+    return;
+  }
+  const sid=(S&&S.session&&(S.session.session_id||S.session.id))||'';
+  fetch(new URL('api/session/provider-suggestion',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:sid}),
+  }).then(res=>{
+    if(!res.ok) throw new Error('suggestion unavailable');
+    return res.json();
+  }).then(data=>{
+    const suggestion=data&&data.suggestion;
+    _providerSuggestionCache[key]=suggestion||null;
+    if(_providerSuggestionKey()!==key) return;
+    const ddNow=$('composerModelDropdown');
+    if(!ddNow||!ddNow.classList.contains('open')) return;
+    if(suggestion&&suggestion.suggested_provider) _renderProviderSuggestionBanner(ddNow,suggestion);
+  }).catch(()=>{});
+}
+
+function _renderProviderSuggestionBanner(dd,suggestion){
+  _removeProviderSuggestionBanner();
+  const provider=String(suggestion.suggested_provider||'');
+  if(!provider) return;
+  const pct=(typeof suggestion.confidence==='number')?Math.round(suggestion.confidence*100):null;
+  const banner=document.createElement('div');
+  banner.id='providerSuggestionBanner';
+  banner.className='provider-suggestion-banner';
+  const label=document.createElement('span');
+  label.className='provider-suggestion-text';
+  label.textContent='Suggested provider: '+provider+(pct===null?'':' ('+pct+'%)')+(suggestion.uncertain?' — please confirm':'');
+  if(suggestion.reason) label.title=String(suggestion.reason);
+  const apply=document.createElement('button');
+  apply.type='button';
+  apply.className='provider-suggestion-apply';
+  apply.textContent='Apply';
+  apply.onclick=ev=>{ev.stopPropagation();_applyProviderSuggestion(provider);};
+  const dismiss=document.createElement('button');
+  dismiss.type='button';
+  dismiss.className='provider-suggestion-dismiss';
+  dismiss.textContent='Dismiss';
+  dismiss.setAttribute('aria-label','Dismiss provider suggestion');
+  dismiss.onclick=ev=>{ev.stopPropagation();_dismissProviderSuggestion();};
+  banner.appendChild(label);
+  banner.appendChild(apply);
+  banner.appendChild(dismiss);
+  dd.insertBefore(banner,dd.firstChild);
+}
+
+async function _applyProviderSuggestion(provider){
+  const s=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+  if(!s||!s.model) return;
+  const key=_providerSuggestionKey();
+  const banner=document.getElementById('providerSuggestionBanner');
+  if(banner) banner.classList.add('applying');
+  try{
+    if(typeof _persistSessionModelCorrection!=='function') throw new Error('unavailable');
+    await _persistSessionModelCorrection(s.model,provider,{propagateErrors:true});
+    s.model_provider=provider;
+    const sel=$('modelSelect');
+    if(sel&&typeof _applyModelToDropdown==='function') _applyModelToDropdown(s.model,sel,provider);
+    if(typeof syncModelChip==='function') syncModelChip();
+    if(key) _providerSuggestionCache[key]=null;
+    _removeProviderSuggestionBanner();
+    if(typeof showToast==='function') showToast('Provider set to '+provider);
+  }catch(_){
+    if(banner) banner.classList.remove('applying');
+    if(typeof showToast==='function') showToast('Could not set provider',4000,'error');
+  }
+}
+
+function _dismissProviderSuggestion(){
+  const key=_providerSuggestionKey();
+  if(key) _providerSuggestionDismissed[key]=true;
+  _removeProviderSuggestionBanner();
 }
 
 document.addEventListener('click',e=>{
