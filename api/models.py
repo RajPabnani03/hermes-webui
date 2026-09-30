@@ -11657,10 +11657,9 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     """Return only state.db rows that are newer than model-facing context.
 
     `context_messages` is the authoritative model-facing prefix. state.db may
-    contain a mirrored copy of that prefix. Appending the whole state transcript
-    to a clean sidecar context replays old context into the next runtime prompt.
-    User mirrors require exact occurrence metadata: missing or changed timestamps
-    and identities preserve the row rather than silently deleting repeated input.
+    contain a mirrored copy of that prefix with fresh timestamps, especially for
+    LCM/continuation sessions. Appending the whole state transcript to a clean
+    sidecar context replays old context into the next runtime prompt.
     """
     sidecar_context = list(sidecar_context or [])
     state_messages = list(state_messages or [])
@@ -11721,10 +11720,6 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
         if state_keys[state_index] == sidecar_keys[sidecar_index]:
             sidecar_index += 1
-        elif state_keys[state_index][0] == "user":
-            # Do not scan past an unrepresented user occurrence to find a later
-            # assistant mirror: slicing that prefix would delete real input.
-            return state_messages[best_len:]
         state_index += 1
     if sidecar_index == len(sidecar_keys):
         return state_messages[state_index:]
@@ -12693,9 +12688,13 @@ def _merge_session_messages_append_only_impl(
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
         # preserves sidecar-only ordering/metadata for equal timestamps and
-        # prevents duplicate legacy assistant/tool rows when timestamp precision
-        # differs between stores. User rows instead require occurrence-sensitive
-        # content identity; unmatched users are inserted chronologically below.
+        # prevents duplicate legacy rows when timestamp precision differs
+        # between stores. State rows whose visible content already exists in
+        # the sidecar are also skipped even if state.db restamped them later
+        # during compaction/recovery; otherwise old prompts can be appended
+        # after the assistant tail and make /api/session look like the answer
+        # vanished. Explicit message ids are authoritative for distinct rows
+        # only when their visible content is not already present.
         if (
             key[0] != "message_id"
             and max_sidecar_timestamp is not None

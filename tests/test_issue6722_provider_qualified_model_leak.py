@@ -26,11 +26,32 @@ guessing either way breaks the other. These tests pin both shapes so a future
 from collections import OrderedDict
 import json
 
+import pytest
+
+import api.config as config
 import api.gateway_chat as gateway_chat
 import api.models as models
 import api.streaming as streaming
 from api.config import STREAMS, create_stream_channel
 from api.models import new_session
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config():
+    # The shared parser's custom:<slug> peel consults cfg["model"]["provider"]:
+    # a leaked local-server provider in the shared test config.yaml would route
+    # the custom:* cases below onto that provider instead of keeping the hint.
+    # Mutating cfg in place counts as an in-memory override, which suppresses
+    # the lazy reload of the shared file.
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg["model"] = {}
+    config.cfg["providers"] = {}
+    yield
+    config.cfg.clear()
+    config.cfg.update(old_cfg)
+    config._cfg_mtime = old_mtime
 
 
 # (qualified value, expected bare model, expected provider)

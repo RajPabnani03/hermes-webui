@@ -67,6 +67,24 @@ def _isolate_agent_locks():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_config():
+    # Lane canonicalization reads cfg["model"]["provider"]: an earlier test that
+    # writes a local-server provider into the shared test config.yaml would make
+    # unconfigured custom:<slug> hints peel onto that provider and break the
+    # expected lane keys here. Mutating cfg in place counts as an in-memory
+    # override, which suppresses the lazy reload of the shared file.
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg["model"] = {}
+    config.cfg["providers"] = {}
+    yield
+    config.cfg.clear()
+    config.cfg.update(old_cfg)
+    config._cfg_mtime = old_mtime
+
+
+@pytest.fixture(autouse=True)
 def _default_live_credential_revalidation(monkeypatch):
     monkeypatch.setattr(
         routes,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -145,6 +146,13 @@ def isolated_self_hosted_env(monkeypatch, tmp_path):
     fake_config_path = tmp_path / "config.yaml"
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    # _post() reaches the shared test server subprocess, which resolves its own
+    # config path (HERMES_CONFIG_PATH) — the in-process monkeypatches below cannot
+    # redirect it. Self-hosted setup writes therefore land in the shared
+    # config.yaml and leak model/provider state into every later test unless the
+    # file is restored.
+    shared_cfg_path = Path(os.environ["HERMES_CONFIG_PATH"]) if os.getenv("HERMES_CONFIG_PATH") else None
+    shared_cfg_bytes = shared_cfg_path.read_bytes() if shared_cfg_path and shared_cfg_path.exists() else None
     config.cfg.clear()
     config.cfg["model"] = {}
     config.cfg["providers"] = {}
@@ -157,6 +165,11 @@ def isolated_self_hosted_env(monkeypatch, tmp_path):
     config.cfg.clear()
     config.cfg.update(old_cfg)
     config._cfg_mtime = old_mtime
+    if shared_cfg_path is not None:
+        if shared_cfg_bytes is None:
+            shared_cfg_path.unlink(missing_ok=True)
+        else:
+            shared_cfg_path.write_bytes(shared_cfg_bytes)
 
 
 def test_post_self_hosted_provider_succeeds_for_ollama(isolated_self_hosted_env):
