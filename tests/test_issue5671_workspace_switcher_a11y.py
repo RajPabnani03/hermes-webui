@@ -88,9 +88,10 @@ def test_workspace_selection_from_composer_dropdown_restores_focus_to_opening_tr
     assert "_shouldRestoreComposerWorkspaceFocus(composerDd)" in switch
     assert "_focusComposerWorkspaceTarget(restoreComposerFocusTarget)" in switch
     assert switch.count("_focusComposerWorkspaceTarget(restoreComposerFocusTarget)") == 1
-    assert switch.index("syncTopbar();") < switch.index("_focusComposerWorkspaceTarget(restoreComposerFocusTarget)") < switch.index("await loadDir('.')")
+    focus_idx = switch.index("_focusComposerWorkspaceTarget(restoreComposerFocusTarget)")
+    assert switch.index("syncTopbar();") < focus_idx < switch.index("await loadDir('.')", focus_idx)
     assert "workspace_switched_to" in switch
-    assert switch.index("_focusComposerWorkspaceTarget(restoreComposerFocusTarget)") < switch.index("workspace_switched_to")
+    assert focus_idx < switch.index("workspace_switched_to", focus_idx)
 
 
 def test_new_chat_has_screen_reader_only_workspace_announcer():

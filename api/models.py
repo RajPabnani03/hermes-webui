@@ -10125,7 +10125,6 @@ def get_state_db_session_message_keys_before_timestamp(
                 SELECT
                     COALESCE(role, '') AS role,
                     COALESCE(content, '') AS content,
-                    timestamp,
                     tool_calls{api_content_select}
                 FROM messages
                 WHERE session_id = ? AND timestamp IS NOT NULL AND timestamp < ?
@@ -10142,7 +10141,6 @@ def get_state_db_session_message_keys_before_timestamp(
                         # prefix/tail collision proof can miss a genuine
                         # repeated recovered turn.
                         "content": _decode_state_db_content(row["content"]),
-                        "timestamp": row["timestamp"],
                         "tool_calls": _json_loads_if_string(row["tool_calls"]),
                         "api_content": row["api_content"] if "api_content" in available else None,
                     },
@@ -10728,26 +10726,9 @@ def _content_identity_for_key(content):
     return identity
 
 
-def _user_message_occurrence_key(msg: dict):
-    """Require an exact timestamp and agreement of every private identity.
-
-    Unknown timestamps cannot prove an occurrence, even when content or IDs
-    agree. A fresh token deliberately makes such keys non-deduplicating.
-    """
-    timestamp = _message_timestamp_as_float(msg)
-    if timestamp is None:
-        return (object(),)
-    return (timestamp,) + tuple(
-        str(msg.get(name)) if msg.get(name) not in (None, "") else ""
-        for name in ("id", "message_id", "_state_db_row_id")
-    )
-
-
 def _session_message_merge_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
-    if msg.get("role") == "user":
-        return ("user_occurrence", _session_message_content_key(msg))
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
         return _session_message_key_with_sidecar(
@@ -11445,8 +11426,6 @@ def _session_message_dedup_key(msg: dict):
     """
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
-    if msg.get("role") == "user":
-        return ("user_occurrence", _session_message_content_key(msg))
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
         return _session_message_key_with_sidecar(
@@ -11521,7 +11500,7 @@ def _session_message_content_key(
         content,
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
-    ) + ((_user_message_occurrence_key(msg),) if role == "user" else ()), msg)
+    ), msg)
 
 
 def _session_message_visible_key(
@@ -11531,8 +11510,6 @@ def _session_message_visible_key(
 ):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
-    if msg.get("role") == "user":
-        return _session_message_content_key(msg)
     # Include tool_calls so assistant messages that invoke different tools
     # (but share identical empty content) are not collapsed by sidecar
     # prefix matching.  Without this, all tool-calling messages map to
@@ -11581,11 +11558,9 @@ _VISIBLE_DUPLICATE_FUZZY_MAX_KEYS = 1000
 
 
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
-    role = visible_key[0]
-    if role == "user" and (len(visible_key) != 5 or len(visible_key[-1]) != 4):
-        return None
     if visible_key in visible_keys:
         return visible_key
+    role = visible_key[0]
     content = visible_key[1] if len(visible_key) > 1 else ""
     sidecar = visible_key[3] if len(visible_key) > 3 else None
     if not content:
@@ -11615,10 +11590,6 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lo
             or not existing_content
             or not isinstance(existing_content, str)
         ):
-            continue
-        # Fuzzy content is useful for mirrored display wrappers, but only after
-        # exact occurrence metadata establishes that this is the same user turn.
-        if role == "user" and visible_key[2:] != existing_key[2:]:
             continue
         # Exact visible-key equality was checked above. For very large payloads
         # (tool logs / request dumps), Python-in substring and fuzzy-token

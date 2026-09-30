@@ -1841,7 +1841,7 @@ async function cmdRetry(){
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
     if(!S.session||S.session.session_id!==activeSid)return;
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=data.session.tool_calls||[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
     // pick — but only if it's still safe at fire time (session unchanged, current
@@ -1862,7 +1862,7 @@ async function cmdUndo(){
     // Bounded tail: a bare reload used to pull and re-redact the whole
     // transcript on every /undo recovery (#7310/#7625).
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1');
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=data.session.tool_calls||[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }

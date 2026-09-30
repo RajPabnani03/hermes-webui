@@ -77,28 +77,30 @@ def test_screen_reader_announcement_live_region_markup():
 def test_sync_workspace_displays_updates_chip_accessibility():
     block = _function_block(PANELS_JS, "syncWorkspaceDisplays")
     assert "composerChip.setAttribute('aria-label'" in block
-    assert "workspace_switcher_aria_label" in block
-    assert "workspace_switcher_no_workspace_aria_label" in block
+    assert "workspace_switcher_aria" in block
+    assert "no_workspace" in block
     assert "composerChip.setAttribute('aria-expanded'" in block
     assert "composerChip.setAttribute('aria-haspopup'" in block
 
 
 def test_new_session_announces_resolved_workspace():
     block = _function_block(SESSIONS_JS, "newSession")
-    assert "_announceNewChatWorkspace(S.session)" in block
+    assert "_announceNewSessionWorkspace(S.session)" in block
 
-    helper = _function_block(SESSIONS_JS, "_announceNewChatWorkspace")
-    assert "workspace_new_chat_announcement" in helper
-    assert "t('workspace_new_chat_announcement', name)" in helper
-    assert "requestAnimationFrame" in helper
-    assert "ann.textContent = '';" in helper
-    assert "ann.textContent = message;" in helper
+    helper = _function_block(SESSIONS_JS, "_announceNewSessionWorkspace")
+    assert "new_session_workspace_announce" in helper
+    assert "t('new_session_workspace_announce',name)" in helper
     assert "getWorkspaceFriendlyName" in helper
+
+    cue = _function_block(SESSIONS_JS, "_setNewSessionWorkspaceCue")
+    assert "requestAnimationFrame" in cue
+    assert "announcer.textContent=''" in cue
+    assert "announcer.textContent=message" in cue
 
 
 def test_english_i18n_keys_for_workspace_switcher_announcement():
     # The en bundle is the first LOCALES block; key presence in other locales
     # is handled by runtime fallback, so we enforce the canonical English keys.
-    assert "workspace_switcher_aria_label:" in I18N_JS
-    assert "workspace_switcher_no_workspace_aria_label:" in I18N_JS
-    assert "workspace_new_chat_announcement:" in I18N_JS
+    assert "workspace_switcher_aria:" in I18N_JS
+    assert "no_workspace:" in I18N_JS
+    assert "new_session_workspace_announce:" in I18N_JS

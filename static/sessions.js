@@ -189,24 +189,6 @@ function _clearRememberedNewChatDraftSession(sid) {
   } catch (_) {}
 }
 
-function _announceNewChatWorkspace(session) {
-  const ann = $('srAnnouncements');
-  if (!ann) return;
-  const ws = session && (session.workspace || session.workspace_path || null);
-  if (!ws) {
-    ann.textContent = '';
-    return;
-  }
-  const name = (typeof getWorkspaceFriendlyName === 'function')
-    ? getWorkspaceFriendlyName(ws)
-    : ws;
-  const message = t('workspace_new_chat_announcement', name);
-  // Clear then re-set in a fresh task so screen readers announce repeated
-  // consecutive new chats in the same workspace (the text is identical).
-  ann.textContent = '';
-  requestAnimationFrame(() => { ann.textContent = message; });
-}
-
 function _adoptRegenerationRevision(sessionPayload){
   if(!S||!S.session||!sessionPayload||typeof sessionPayload!=='object') return;
   if(Object.prototype.hasOwnProperty.call(sessionPayload,'regeneration_revision')){
@@ -215,7 +197,6 @@ function _adoptRegenerationRevision(sessionPayload){
     delete S.session.regeneration_revision;
   }
 }
-
 
 async function _restoreRememberedNewChatDraftSession() {
   let sid = '';
@@ -2081,7 +2062,6 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
-    _announceNewChatWorkspace(S.session);
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);

@@ -876,6 +876,7 @@ def test_snapshot_refuses_when_wal_data_version_changes(monkeypatch, tmp_path):
     real_conn = sqlite3.connect(db)
     fake = _FakeConn(real_conn)
     monkeypatch.setattr(models, "open_state_db_readonly", lambda _p: fake)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
     snap = models.get_state_db_regeneration_tail_snapshot("s1", 50.0)
     assert snap is None, "changed data_version must refuse the bounded snapshot"
 

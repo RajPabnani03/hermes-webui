@@ -243,6 +243,15 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
             os.fsync(f.fileno())
         _verify_symlink_target()
         os.replace(tmp, write_path)
+        # Some platforms clear suid/sgid bits set via fchmod on a fd whose
+        # ownership was just adjusted with fchown (observed on macOS/BSD:
+        # fchmod(fd, 0o2664) applies only 0o664). Re-apply the full mode on the
+        # renamed path so special bits survive the atomic replace.
+        if mode is not None and mode & 0o7000:
+            try:
+                os.chmod(write_path, mode)
+            except OSError:
+                pass
         _fsync_directory(write_path.parent)
     except BaseException:
         if owns_fd:

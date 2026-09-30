@@ -5772,6 +5772,7 @@ function syncWorkspaceDisplays(){
     composerChip.title=hasWorkspace?ws:t('no_workspace');
     composerChip.setAttribute('aria-label',hasWorkspace?t('workspace_switcher_aria',label):t('no_workspace'));
     composerChip.setAttribute('aria-expanded',composerExpanded?'true':'false');
+    composerChip.setAttribute('aria-haspopup','true');
     composerChip.classList.toggle('active',composerExpanded);
   }
   if(mobileAction){
@@ -6548,7 +6549,7 @@ async function switchToWorkspace(path,name){
   // workspace or keep the current conversation in its current workspace. The safe
   // default (cancel) keeps the current chat; confirm starts a new chat bound to
   // the target workspace (#5473).
-  if(_workspaceSwitchHasConversation()){
+  if(typeof _workspaceSwitchHasConversation==='function'&&_workspaceSwitchHasConversation()){
     const startNew=await showConfirmDialog({
       title:t('workspace_switch_new_chat_title'),
       message:t('workspace_switch_new_chat_message',targetName),
