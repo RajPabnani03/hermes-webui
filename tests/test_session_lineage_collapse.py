@@ -364,7 +364,7 @@ eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const raw = [
   {{session_id:'root', title:'Root', updated_at:10, last_message_at:10, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
   {{session_id:'tip', title:'Tip', updated_at:20, last_message_at:20, _lineage_root_id:'root', _lineage_tip_id:'tip'}},
-  {{session_id:'child', title:'Subtask', parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root', updated_at:30, last_message_at:30}},
+  {{session_id:'child', title:'Subtask', parent_session_id:'tip', relationship_type:'child_session', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:30, last_message_at:30}},
 ];
 const collapsed = _collapseSessionLineageForSidebar(raw);
 const attached = _attachChildSessionsToSidebarRows(collapsed, raw);
@@ -374,6 +374,72 @@ console.log(JSON.stringify(attached));
     assert [row["session_id"] for row in rows] == ["tip"]
     assert rows[0]["_child_session_count"] == 1
     assert rows[0]["_child_sessions"][0]["session_id"] == "child"
+
+
+def test_mixed_source_live_refresh_keeps_authoritative_tip_and_child_set():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_sessionDisplayTitle'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+function summarize(raw) {{
+  const collapsed = _collapseSessionLineageForSidebar(raw);
+  const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+  const row = rows[0];
+  return {{
+    visibleSid: row.session_id,
+    badgeKind: row._child_session_count > 0 ? 'children' : 'prior-turns',
+    childSids: (row._child_sessions || []).map(child => child.session_id),
+    segmentSids: (row._lineage_segments || []).map(seg => seg.session_id),
+  }};
+}}
+const refreshA = [
+  {{session_id:'root', title:'Optimizing Hermes Development', updated_at:40, last_message_at:40, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'tip', title:'Optimizing Hermes Development', parent_session_id:'root', updated_at:20, last_message_at:20, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'fork-child', title:'Optimizing Hermes Development child', parent_session_id:'root', relationship_type:'child_session', session_source:'fork', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:50, last_message_at:50}},
+];
+const refreshB = [
+  {{session_id:'root', title:'Optimizing Hermes Development', updated_at:10, last_message_at:10, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'tip', title:'Optimizing Hermes Development', parent_session_id:'root', updated_at:60, last_message_at:60, _lineage_root_id:'root', _lineage_tip_id:'tip', _compression_segment_count:2}},
+  {{session_id:'fork-child', title:'Optimizing Hermes Development child', parent_session_id:'root', relationship_type:'child_session', session_source:'fork', _parent_lineage_root_id:'root', _parent_lineage_tip_id:'tip', updated_at:50, last_message_at:50}},
+];
+console.log(JSON.stringify([summarize(refreshA), summarize(refreshB)]));
+"""
+    assert json.loads(_run_node(source)) == [
+        {
+            "visibleSid": "tip",
+            "badgeKind": "children",
+            "childSids": ["fork-child"],
+            "segmentSids": ["root", "tip"],
+        },
+        {
+            "visibleSid": "tip",
+            "badgeKind": "children",
+            "childSids": ["fork-child"],
+            "segmentSids": ["tip", "root"],
+        },
+    ]
 
 
 
@@ -433,6 +499,181 @@ console.log(JSON.stringify(rows));
     assert "_orphan_child_session" not in rows[0]["_child_sessions"][0]
 
 
+def test_cross_surface_subagents_stack_under_visible_messaging_parent():
+    """Delegated subagents stay nested even when their visible parent is external."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+function _isExternalSession(s) {{ return !!(s && (s.is_cli_session || s.session_source === 'messaging')); }}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{
+  session_id:'messaging_parent',
+  title:'Messaging parent',
+  raw_source:'weixin',
+  source_tag:'weixin',
+  session_source:'messaging',
+  message_count:3,
+}}];
+const raw = [
+  collapsed[0],
+  ...['delegate_a', 'delegate_b', 'delegate_c'].map(session_id => ({{
+    session_id,
+    title:'Subagent Session',
+    parent_session_id:'messaging_parent',
+    relationship_type:'child_session',
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    _parent_lineage_root_id:'messaging_parent',
+    _cross_surface_child_session:true,
+  }})),
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows));
+"""
+    rows = json.loads(_run_node(source))
+    assert [row["session_id"] for row in rows] == ["messaging_parent"]
+    assert rows[0]["_child_session_count"] == 3
+    assert [child["session_id"] for child in rows[0]["_child_sessions"]] == [
+        "delegate_a",
+        "delegate_b",
+        "delegate_c",
+    ]
+    assert all("_orphan_child_session" not in child for child in rows[0]["_child_sessions"])
+
+
+
+
+def test_delegated_subagent_source_precedence_ignores_stale_metadata():
+    """Only the first nonblank raw-role marker may assert delegation."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const parent = {{
+  session_id:'messaging_parent',
+  title:'Messaging parent',
+  raw_source:'weixin',
+  source_tag:'weixin',
+  session_source:'messaging',
+}};
+function runCase(name, overrides, includeChildInCollapsed=false) {{
+  const child = {{
+    session_id:name,
+    title:name,
+    parent_session_id:'messaging_parent',
+    relationship_type:'child_session',
+    raw_source:'api_server',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'api',
+    _parent_lineage_root_id:'messaging_parent',
+    _cross_surface_child_session:true,
+    ...overrides,
+  }};
+  const collapsed = includeChildInCollapsed ? [{{...parent}}, child] : [{{...parent}}];
+  const rows = _attachChildSessionsToSidebarRows(collapsed, [collapsed[0], child]);
+  const parentRow = rows.find(row => row.session_id === 'messaging_parent');
+  return {{
+    name,
+    topLevel:rows.map(row => row.session_id),
+    nested:(parentRow._child_sessions || []).map(row => row.session_id),
+  }};
+}}
+const results = [
+  runCase('stale_source_tag', {{
+    raw_source:'api_server',
+    source_tag:'subagent',
+  }}),
+  runCase('stale_session_source', {{
+    raw_source:'api_server',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'subagent',
+  }}),
+  runCase('source_tag_fallback', {{
+    raw_source:'   ',
+    source_tag:' SubAgent ',
+    source:'api_server',
+    session_source:'other',
+  }}),
+  runCase('authentic_raw_source', {{
+    raw_source:'subagent',
+    source_tag:'api_server',
+    source:'api_server',
+    session_source:'other',
+  }}),
+  runCase('not_child_session', {{
+    relationship_type:null,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    source:'subagent',
+    session_source:'other',
+  }}, true),
+];
+console.log(JSON.stringify(results));
+"""
+    assert json.loads(_run_node(source)) == [
+        {
+            "name": "stale_source_tag",
+            "topLevel": ["messaging_parent", "stale_source_tag"],
+            "nested": [],
+        },
+        {
+            "name": "stale_session_source",
+            "topLevel": ["messaging_parent", "stale_session_source"],
+            "nested": [],
+        },
+        {
+            "name": "source_tag_fallback",
+            "topLevel": ["messaging_parent"],
+            "nested": ["source_tag_fallback"],
+        },
+        {
+            "name": "authentic_raw_source",
+            "topLevel": ["messaging_parent"],
+            "nested": ["authentic_raw_source"],
+        },
+        {
+            "name": "not_child_session",
+            "topLevel": ["messaging_parent", "not_child_session"],
+            "nested": [],
+        },
+    ]
+
 
 def test_cross_surface_subagent_child_stacks_under_visible_fork_parent():
     """Forked WebUI conversations can still own subagent child rows."""
@@ -486,6 +727,85 @@ console.log(JSON.stringify(rows));
     assert [row["session_id"] for row in rows] == ["fork_parent"]
     assert rows[0]["_child_session_count"] == 1
     assert rows[0]["_child_sessions"][0]["session_id"] == "subagent_child"
+
+
+def test_read_only_child_sessions_are_stacked_after_writable_children():
+    """Read-only delegated children should render after fork/writable children."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_isReadOnlySession'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_attachChildSessionsToSidebarRows'));
+const collapsed = [{{
+  session_id:'parent',
+  title:'Parent conversation',
+  message_count:3,
+  updated_at: 1700000010,
+  last_message_at: 1700000010,
+}}];
+const raw = [
+  collapsed[0],
+  {{
+    session_id:'read_only_subagent',
+    title:'Retained Subagent',
+    parent_session_id:'parent',
+    relationship_type:'child_session',
+    read_only: true,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    updated_at: 1700000030,
+    last_message_at: 1700000030,
+  }},
+  {{
+    session_id:'fork_child',
+    title:'Fork',
+    parent_session_id:'parent',
+    session_source:'fork',
+    raw_source:'webui',
+    source_tag:'webui',
+    source_label:'WebUI',
+    updated_at: 1700000040,
+    last_message_at: 1700000040,
+  }},
+  {{
+    session_id:'writable_subagent',
+    title:'Writable Subagent',
+    parent_session_id:'parent',
+    relationship_type:'child_session',
+    read_only: false,
+    raw_source:'subagent',
+    source_tag:'subagent',
+    session_source:'other',
+    source_label:'Subagent',
+    updated_at: 1700000020,
+    last_message_at: 1700000020,
+  }},
+];
+const rows = _attachChildSessionsToSidebarRows(collapsed, raw);
+console.log(JSON.stringify(rows[0]._child_sessions.map(row => row.session_id)));
+"""
+    rows = json.loads(_run_node(source))
+    assert rows == ["fork_child", "writable_subagent", "read_only_subagent"]
+    assert "const sortedChildren=[...s._child_sessions];" in js
+    assert "const sortedChildren=[...s._child_sessions].sort" not in js
 
 
 def test_parent_source_label_display_text_does_not_force_external_orphaning():
@@ -605,6 +925,9 @@ eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_isDelegatedSubagentRow'));
+eval(extractFunc('_sidebarProjectResolver'));
+eval(extractFunc('_sidebarRowsById'));
 eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
 const child = {{session_id:'child', title:'Subagent', parent_session_id:'parent', relationship_type:'child_session', updated_at:20, last_message_at:20, source:'webui'}};
@@ -653,6 +976,9 @@ eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
+eval(extractFunc('_isDelegatedSubagentRow'));
+eval(extractFunc('_sidebarProjectResolver'));
+eval(extractFunc('_sidebarRowsById'));
 eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
 const child = {{session_id:'child', title:'Fork in projA', parent_session_id:'parent', relationship_type:'child_session', project_id:'projA', message_count:3, updated_at:20, last_message_at:20, source:'webui'}};
@@ -1016,7 +1342,7 @@ console.log(JSON.stringify(rows));
     assert "_child_sessions" not in rows[0]
 
 
-def test_nested_fork_bubbles_latest_child_timestamp_for_sorting():
+def test_nested_fork_tracks_latest_child_without_changing_parent_bucket_timestamp():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1046,15 +1372,15 @@ console.log(JSON.stringify({{row: rows[0], timestampMs: _sessionTimestampMs(rows
     result = json.loads(_run_node(source))
     row = result["row"]
     assert row["session_id"] == "parent"
-    # Keep the parent row's persisted timestamp intact, but use newest attached
-    # child/subagent activity for sidebar sorting/date grouping.
+    # Keep the parent row's persisted timestamp intact while still recording
+    # the newest attached child/subagent metadata.
     assert row["last_message_at"] == 10
     assert row["_child_session_latest_at"] == 20
-    assert row["_sidebar_activity_at"] == 20
-    assert result["timestampMs"] == 20_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
-def test_hidden_archived_lineage_child_bubbles_running_state_and_activity_to_visible_parent():
+def test_hidden_archived_lineage_child_bubbles_running_state_and_latest_child_timestamp_without_changing_parent_bucket():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1113,11 +1439,11 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert "_child_sessions" not in row
     assert row["_child_session_streaming"] is True
     assert row["_child_session_latest_at"] == 30
-    assert row["_sidebar_activity_at"] == 30
-    assert result["timestampMs"] == 30_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
-def test_archived_lineage_child_without_root_id_falls_back_to_parent_for_bubbling():
+def test_archived_lineage_child_without_root_id_preserves_parent_bucket_timestamp():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1175,8 +1501,8 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert "_child_sessions" not in row
     assert row["_child_session_streaming"] is True
     assert row["_child_session_latest_at"] == 30
-    assert row["_sidebar_activity_at"] == 30
-    assert result["timestampMs"] == 30_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
 def test_non_archived_reference_only_lineage_row_does_not_bubble_to_visible_parent():
@@ -1242,7 +1568,7 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert result["timestampMs"] == 10_000
 
 
-def test_stale_active_stream_id_on_hidden_archived_child_does_not_bubble_streaming_state():
+def test_stale_active_stream_id_on_hidden_archived_child_keeps_parent_bucket_and_latest_child_timestamp():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""
 const src = {js!r};
@@ -1301,8 +1627,8 @@ console.log(JSON.stringify({{row: rows[0], count: rows.length, timestampMs: _ses
     assert "_child_sessions" not in row
     assert "_child_session_streaming" not in row
     assert row["_child_session_latest_at"] == 30
-    assert row["_sidebar_activity_at"] == 30
-    assert result["timestampMs"] == 30_000
+    assert "_sidebar_activity_at" not in row
+    assert result["timestampMs"] == 10_000
 
 
 def test_collapsed_lineage_segments_do_not_render_as_child_sessions():
@@ -1502,8 +1828,8 @@ def test_sidebar_lineage_segment_badge_is_detailed_density_only_and_localized():
     assert "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');" in js
     assert "const showLineageMetadata=density==='detailed';" in js
     assert "const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;" in js
-    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey):[];" in js
     assert "const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;" in js
+    assert "const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey,needsLineageReport):[];" in js
     assert "const canExpandLineageSegments=showLineageMetadata&&Boolean(" in js
     assert "t('session_meta_segments', segmentCount)" in js
     assert "titleRow.appendChild(segmentCountEl);" in js
@@ -1530,9 +1856,9 @@ def test_lineage_segment_expansion_static_contract():
     assert "className='session-lineage-segment'" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
     assert "row.title=t('session_lineage_segment_open');" in js
-    assert "await loadSession(seg.session_id, {skipLineageResolve:true});" in js
+    assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in js
     assert "const openChildSession=async(childSession)=>{" in js
-    assert "await loadSession(childSession.session_id, {skipLineageResolve:true});" in js
+    assert "await _openSidebarSession(childSession, {skipLineageResolve:true});" in js
     assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in js
     assert ".session-lineage-count.expandable{" in css
     assert ".session-lineage-count.expandable:hover" in css
@@ -1560,6 +1886,7 @@ function extractFunc(name) {{
 const _lineageReportCache = new Map();
 const _lineageReportInflight = new Map();
 eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_authoritativeLineageTipId'));
 eval(extractFunc('_lineageLocalSegmentCount'));
 eval(extractFunc('_lineageReportNeedsFetch'));
 const backendOnly = {{session_id:'tip', _lineage_key:'root', _compression_segment_count:25}};
@@ -1575,7 +1902,103 @@ const afterCache = _lineageReportNeedsFetch(backendOnly, 'root', 25);
 const fullLocal = _lineageReportNeedsFetch(localFull, 'root', 2);
 console.log(JSON.stringify({{before, afterCache, fullLocal}}));
 """
-    assert json.loads(_run_node(source)) == {"before": True, "afterCache": False, "fullLocal": False}
+    assert json.loads(_run_node(source)) == {"before": True, "afterCache": True, "fullLocal": False}
+
+
+def test_lineage_report_cache_identity_uses_tip_and_evicts_segment_count_mismatch():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageLocalSegmentCount'));
+eval(extractFunc('_lineageReportNeedsFetch'));
+const oldTip = {{session_id:'old-tip', _lineage_key:'root', _lineage_tip_id:'old-tip', _compression_segment_count:2}};
+const newTip = {{session_id:'new-tip', _lineage_key:'root', _lineage_tip_id:'new-tip', _compression_segment_count:3}};
+const staleSameTip = {{session_id:'new-tip', _lineage_key:'root', _lineage_tip_id:'new-tip', _compression_segment_count:3}};
+const oldKey = _lineageReportCacheKey(oldTip, 'root');
+const newKey = _lineageReportCacheKey(newTip, 'root');
+_lineageReportCache.set(oldKey, {{segments:[{{session_id:'old-tip'}}, {{session_id:'root'}}]}});
+const tipChangedNeedsFetch = _lineageReportNeedsFetch(newTip, 'root', 3);
+_lineageReportCache.set(newKey, {{segments:[{{session_id:'new-tip'}}, {{session_id:'root'}}]}});
+const mismatchNeedsFetch = _lineageReportNeedsFetch(staleSameTip, 'root', 3);
+console.log(JSON.stringify({{
+  oldKey,
+  newKey,
+  tipChangedNeedsFetch,
+  mismatchNeedsFetch,
+  newCacheRetained:_lineageReportCache.has(newKey),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "oldKey": "root::old-tip",
+        "newKey": "root::new-tip",
+        "tipChangedNeedsFetch": True,
+        "mismatchNeedsFetch": True,
+        "newCacheRetained": False,
+    }
+
+
+def test_render_path_skips_stale_cached_segments_when_mismatch_forces_refresh():
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+const _lineageReportCache = new Map();
+const _lineageReportInflight = new Map();
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_authoritativeLineageTipId'));
+eval(extractFunc('_lineageReportCacheKey'));
+eval(extractFunc('_lineageLocalSegmentCount'));
+eval(extractFunc('_lineageReportNeedsFetch'));
+eval(extractFunc('_lineageSegmentsForRender'));
+const row = {{
+  session_id:'tip',
+  _lineage_key:'root',
+  _lineage_tip_id:'tip',
+  _compression_segment_count:3,
+  _lineage_segments:[{{session_id:'root'}}],
+}};
+_lineageReportCache.set('root::tip', {{
+  segments:[{{session_id:'root'}}, {{session_id:'stale-extra'}}],
+}});
+const needsFetch = _lineageReportNeedsFetch(row, 'root', 3);
+const rendered = _lineageSegmentsForRender(row, 'root', needsFetch).map(seg => seg.session_id);
+console.log(JSON.stringify({{needsFetch, rendered, cacheRetained:_lineageReportCache.has('root::tip')}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "needsFetch": True,
+        "rendered": ["root"],
+        "cacheRetained": False,
+    }
 
 
 def test_cached_lineage_report_segments_merge_with_materialized_segments_without_duplicates_or_children():
@@ -1845,7 +2268,8 @@ def test_sidebar_search_and_rows_use_read_only_display_title():
     assert "const rawTitle=_sessionDisplayTitle(s);" in js
     assert "const tags=_sessionTitleTags(rawTitle);" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js
-    assert "const childTitle=_sessionDisplayTitle(child)||'Untitled child session';" in js
+    assert "const childTitle=_nestedChildTitle(child)||'Untitled child session';" in js
+    assert "  const title=_sessionDisplayTitle(s);\n  return _isDelegatedSubagentRow(s)?" in js
 
 
 def test_child_session_parent_segment_note_uses_display_title():

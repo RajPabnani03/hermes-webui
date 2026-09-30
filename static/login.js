@@ -7,7 +7,11 @@ document.addEventListener('DOMContentLoaded', function () {
   var input = document.getElementById('pw');
   var passkeyBtn = document.getElementById('passkey-login');
 
-  if (!form || !input) return;
+  // #7056: the password input is absent on a passwordless deployment (OIDC-only,
+  // or passkey-only). The form itself still renders and carries the i18n data
+  // attributes, and the passkey button below must still be wired up, so only the
+  // form is required here — every password-specific path is guarded individually.
+  if (!form) return;
 
   var invalidPw = form.getAttribute('data-invalid-pw') || 'Invalid password';
   var connFailed = form.getAttribute('data-conn-failed') || 'Connection failed';
@@ -32,12 +36,35 @@ document.addEventListener('DOMContentLoaded', function () {
       if (raw.charAt(0) !== '/') return './';             // must be path-absolute
       if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './'; // reject // and \\
       if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';  // reject control chars / whitespace
+      // #5578: never redirect back to the login page — that self-referential
+      // chain is what grows the URL exponentially on repeated expired-auth
+      // bounces. Detect the login route even through nested percent-encoding
+      // (a nested chain looks like `/session/login%3Fnext%3D...`, where the `?`
+      // is encoded so a plain split('?') wouldn't isolate the path). Decode a
+      // few levels and check the leading PATH. Only collapse login-route chains
+      // — a legitimate non-login path that merely carries its own `next=` query
+      // key must still round-trip.
+      if (raw.length > 2048) return './';
+      var probe = raw;
+      var stabilized = false;
+      for (var i = 0; i < 8; i++) {
+        var pathOnly = probe.split('?')[0].split('#')[0].split('&')[0].replace(/\/+$/, '');
+        if (pathOnly === '/login' || /\/login$/.test(pathOnly)) return './';
+        var decoded;
+        try { decoded = decodeURIComponent(probe); } catch (_) { stabilized = true; break; }
+        if (decoded === probe) { stabilized = true; break; }
+        probe = decoded;
+      }
+      // If still decoding at the cap (pathologically deep encoding), fail closed.
+      if (!stabilized) return './';
       return raw;
     } catch (_) { return './'; }
   }
 
   async function doLogin(e) {
     e.preventDefault();
+    // No password input on a passwordless deployment: nothing to submit.
+    if (!input) return;
     var pw = input.value;
     hideErr();
     try {
@@ -126,12 +153,14 @@ document.addEventListener('DOMContentLoaded', function () {
     passkeyBtn.addEventListener('click', doPasskeyLogin);
   }
 
-  input.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      doLogin(e);
-    }
-  });
+  if (input) {
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doLogin(e);
+      }
+    });
+  }
 
   // On page load, probe the server so we can distinguish "can't reach server"
   // (Tailscale off, wrong network) from "session expired / need to log in".
@@ -154,7 +183,7 @@ document.addEventListener('DOMContentLoaded', function () {
             // Server is reachable — if we were in retry mode, reload so the
             // page reflects the correct auth state (expired session, etc.).
             if (retryTimer !== null) {
-              clearTimeout(retryTimer);
+              clearInterval(retryTimer);
               retryTimer = null;
               window.location.reload();
             }

@@ -11,9 +11,25 @@ def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
     assert "let _sessionSourceFilter = 'webui'" in src
     assert "hermes-session-source-filter" in src
     assert "session-source-tabs" in src
-    assert "WebUI sessions" in src
-    assert "CLI sessions" in src
+    assert "t('sessions_source_webui', n)" in src
+    assert "t('sessions_source_cli', n)" in src
     assert "_sessionSourceFilter==='cli'" in src
+
+
+def test_session_source_labels_are_locale_keys_with_number_placeholder():
+    """Issue #7580: source tab labels must come from t() with {0}-interpolated
+    counts, not hardcoded English template literals."""
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    assert "sessions_source_webui: 'WebUI sessions ({0})'" in i18n  # en bundle
+    assert "sessions_source_cli: 'CLI sessions ({0})'" in i18n  # en bundle
+    assert "sessions_source_webui: 'Сеансы WebUI ({0})'" in i18n  # ru bundle
+    assert "sessions_source_cli: 'Сеансы CLI ({0})'" in i18n  # ru bundle
+    sessions_src = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "t('sessions_source_cli', n)" in sessions_src
+    assert "t('sessions_source_webui', n)" in sessions_src
+    # The template-literal fallback must be gone: labels now come from the locale.
+    assert "`CLI sessions (${n})`" not in sessions_src
+    assert "`WebUI sessions (${n})`" not in sessions_src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
@@ -257,3 +273,51 @@ def test_tui_continuation_projection_uses_latest_tip_title():
     assert projected[0]["title"] == "Podcast work #17"
     assert projected[0]["_lineage_root_id"] == "tui_parent"
     assert projected[0]["_lineage_tip_id"] == "tui_tip"
+
+
+def test_external_agent_rows_classify_as_cli_matching_client_render():
+    """Regression for #5831: external_agent (Claude Code) imports must count as CLI.
+
+    The client renderer (static/sessions.js: _isCliSession) files an
+    external_agent/claude_code row into the CLI bucket via the is_cli_session
+    fallthrough. The server session-count classifier used to return False for
+    such a row (it carries a real title, so it fell through to the conservative
+    default-title gate), counting it under webui_session_count while the client
+    rendered it under CLI. Result: the WebUI filter showed a non-zero count with
+    an empty list. Server and client must agree — external_agent is CLI.
+    """
+    from api.agent_sessions import is_cli_session_row
+
+    claude_code_row = {
+        "session_id": "claude_code_e62d0c1a6e8d55839e298973",
+        "title": "Overview of AI Capabilities",
+        "source_tag": "claude_code",
+        "raw_source": "claude_code",
+        "session_source": "external_agent",
+        "source_label": "Claude Code",
+        "is_cli_session": True,
+        "read_only": True,
+        "message_count": 225,
+    }
+    # The bug: a real-titled external_agent row was classified non-CLI.
+    assert is_cli_session_row(claude_code_row) is True
+    # Hyphenated variant is treated identically.
+    assert is_cli_session_row({**claude_code_row, "session_source": "external-agent"}) is True
+
+
+def test_external_agent_classification_does_not_overreach():
+    """The external_agent → CLI branch must not reclassify unrelated sources."""
+    from api.agent_sessions import is_cli_session_row
+
+    # Genuine WebUI session stays non-CLI (webui bucket).
+    assert is_cli_session_row(
+        {"session_source": "webui", "is_cli_session": False, "title": "My chat"}
+    ) is False
+    # Messaging session stays non-CLI.
+    assert is_cli_session_row(
+        {"session_source": "messaging", "source_tag": "telegram", "is_cli_session": True, "title": "tg"}
+    ) is False
+    # Delegated subagent (#5307) stays non-CLI / view-only.
+    assert is_cli_session_row(
+        {"session_source": "subagent", "is_cli_session": True, "title": "delegated child"}
+    ) is False

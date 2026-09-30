@@ -108,7 +108,17 @@ def test_session_duplicate_foreign_profile_session_blocked_by_visibility_guard(m
     cap = _capture(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/duplicate"))
 
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: the generic request-guard mirrors the detail-load endpoint's
+    # contract — a session owned by a KNOWN other profile yields
+    # 409 ``session_profile_mismatch`` so the client can offer to
+    # switch to it (#5419). The 404 self-heal path is preserved for
+    # the None-profile (unknown/legacy) case.
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_duplicate",
+        "profile": "other",
+    }
 
 
 def test_session_duplicate_same_profile_still_duplicates(monkeypatch):
@@ -151,7 +161,13 @@ def test_file_read_foreign_profile_session_returns_404_before_file_ops(monkeypat
 
     routes.handle_get(handler, urlparse("/api/file?session_id=foreign_file&path=notes.txt"))
 
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: see line 111 above — same generic-guard contract.
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_file",
+        "profile": "other",
+    }
 
 
 def test_chat_start_foreign_persisted_session_returns_404_before_start_run(monkeypatch):
@@ -171,7 +187,13 @@ def test_chat_start_foreign_persisted_session_returns_404_before_start_run(monke
     cap = _capture(monkeypatch)
     routes.handle_post(handler, urlparse("/api/chat/start"))
 
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: see line 111 above — same generic-guard contract.
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "chat_foreign",
+        "profile": "other",
+    }
 
 
 def test_chat_start_body_profile_cannot_retag_visible_empty_session_without_active_profile(monkeypatch):
@@ -287,7 +309,13 @@ def test_chat_stream_status_blocks_foreign_active_stream(monkeypatch):
             config.ACTIVE_RUNS.clear()
             config.ACTIVE_RUNS.update(previous)
 
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: see line 111 above — same generic-guard contract.
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_session",
+        "profile": "other",
+    }
 
 
 def test_chat_stream_status_blocks_foreign_registered_stream_before_worker_start(monkeypatch):
@@ -328,7 +356,15 @@ def test_chat_stream_status_blocks_foreign_registered_stream_before_worker_start
             config.STREAM_SESSION_OWNERS.clear()
             config.STREAM_SESSION_OWNERS.update(previous_owners)
 
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: see line 111 above — same generic-guard contract.
+    # The helper resolves the stream to its OWNER session id (not the
+    # stream id), so the mismatch payload carries the owner session id.
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_session",
+        "profile": "other",
+    }
 
 
 def test_chat_stream_status_keeps_same_profile_stream_visible(monkeypatch):
@@ -392,7 +428,17 @@ def test_chat_cancel_blocks_foreign_owned_stream_before_cancel_call(monkeypatch)
             config.ACTIVE_RUNS.update(previous)
 
     assert calls["cancel"] == 0
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: see line 111 above — same generic-guard contract.
+    # The helper resolves the stream to its OWNER session id (not the
+    # stream id), so the mismatch payload carries the owner session id.
+    # This test's stream is owned by ``foreign_session`` (see the
+    # ACTIVE_RUNS fixture above).
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_session",
+        "profile": "other",
+    }
 
 
 def test_chat_cancel_same_profile_stream_still_passes_through(monkeypatch):
@@ -443,7 +489,17 @@ def test_chat_stream_blocks_foreign_owned_dead_stream_before_replay(monkeypatch)
     cap = _capture(monkeypatch)
     routes.handle_get(handler, urlparse("/api/chat/stream?stream_id=stream-dead-foreign"))
 
-    assert cap["bad"] == ("Session not found", 404)
+    # #7710: see line 111 above — same generic-guard contract.
+    # The helper resolves the stream to its OWNER session id (not the
+    # stream id), so the mismatch payload carries the owner session id.
+    # This test's stream is owned by ``foreign_session`` (see the
+    # ``find_run_summary`` mock above).
+    assert cap["ok"] == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreign_session",
+        "profile": "other",
+    }
 
 
 def test_chat_stream_allows_unknown_dead_stream_fallback_replay_path(monkeypatch):
@@ -463,8 +519,8 @@ def test_chat_stream_allows_unknown_dead_stream_fallback_replay_path(monkeypatch
     assert calls["replay"] == 0
 
 
-def test_session_new_skips_prev_session_commit_for_other_profile(monkeypatch):
-    """Cross-profile prev_session_id should not block new session creation (#5420)."""
+def test_session_new_skips_prev_session_commit_from_other_profile(monkeypatch):
+    """Cross-profile prev_session_id after a profile switch must not 404 (#5420)."""
     import api.session_lifecycle as session_lifecycle
     handler = _FakeHandler()
     foreign = _SimpleSession("foreign_session", profile="other")
@@ -483,13 +539,18 @@ def test_session_new_skips_prev_session_commit_for_other_profile(monkeypatch):
     monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
     monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: foreign if sid == "foreign_session" else (_ for _ in ()).throw(KeyError("Session not found")))
     monkeypatch.setattr(session_lifecycle, "commit_session_memory", lambda sid, agent=None: calls.__setitem__("commit", calls["commit"] + 1))
-    monkeypatch.setattr(routes, "new_session", lambda **_kwargs: calls.__setitem__("new", calls["new"] + 1) or _NewSession())
+    monkeypatch.setattr(
+        routes,
+        "new_session",
+        lambda **_kwargs: calls.__setitem__("new", calls["new"] + 1) or _NewSession(),
+    )
 
     cap = _capture(monkeypatch)
     routes.handle_post(handler, urlparse("/api/session/new"))
 
     assert calls["commit"] == 0
     assert calls["new"] == 1
+    assert "bad" not in cap
     assert cap["ok"]["session"]["session_id"] == "new_session"
 
 

@@ -15,7 +15,7 @@ On a cron-heavy profile (the #4842 reporter had 200+ cron sessions) that was
 hundreds of file reads per `/api/sessions` build, and because the enclosing
 `_CLI_SESSIONS_CACHE` is keyed on a state.db content fingerprint that advances
 on every streamed message row, the whole scan was re-paid on essentially every
-5s poll during a live turn — pinning CPU to 100% and making `get_cli_sessions`
+streaming poll during a live turn — pinning CPU to 100% and making `get_cli_sessions`
 take multiple seconds (#4842 / #4808 / #4672).
 
 These tests pin the fix: the expensive per-row work is now O(unique files), the
@@ -199,7 +199,9 @@ def test_missing_sidecar_returns_default_without_caching_growth(tmp_path):
     session_dir.mkdir()
     with mock.patch("api.models.SESSION_DIR", session_dir):
         meta = models._state_projection_sidecar_metadata("cron_nope_999")
-    assert meta == {"title": None, "archived": False}
+    # No sidecar means no opinion on archived (None), so the projection falls back
+    # to the state.db row's archived flag (#7548) instead of forcing it to False.
+    assert meta == {"title": None, "archived": None, "project_id": None}
     # No file → nothing cached (so the cache can't be poisoned by absent files).
     assert len(models._SIDECAR_METADATA_CACHE) == 0
 
