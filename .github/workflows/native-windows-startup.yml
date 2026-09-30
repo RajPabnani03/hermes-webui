@@ -23,6 +23,7 @@ on:
 jobs:
   native-windows-startup:
     name: start.ps1 path discovery (mock hermes-agent)
+    if: github.repository == 'nesquena/hermes-webui'
     runs-on: windows-latest
     timeout-minutes: 8
 

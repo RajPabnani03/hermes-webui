@@ -103,13 +103,17 @@ function _jumpToMessage(rawIdx) {
     return;
   }
 
-  // Row is outside the render window. This is an intentional full-history
-  // operation: preserve the target's absolute index when replacing a tail.
+  // Row is outside the render window — reload the full session and retry.
+  // Request the COMPLETE transcript via the explicit msg_limit=all escape
+  // hatch: the target row is addressed by absolute index (msg-user-<rawIdx>),
+  // so a bounded tail window would miss early rows. The bare no-limit shape
+  // is not used here intentionally — full-transcript intent must be explicit
+  // so recovery paths stay bounded (#7310/#7625).
   if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
   const absoluteIdx = rawIdx + (typeof _oldestIdx !== 'undefined' ? _oldestIdx : 0);
   api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0')
+      '&messages=1&resolve_model=0&msg_limit=all')
     .then(function(data) {
       if (!data || !data.session) return;
       if (!S.session || S.session.session_id !== sid) return;  // session switched

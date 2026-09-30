@@ -381,7 +381,7 @@ def test_non_adjacent_replayed_context_block_is_not_appended_again():
 def test_prefer_context_reconcile_strips_state_db_mirrored_prefix():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
-        {"role": "user", "content": "[Session Arc Summary]", "timestamp": 101.0},
+        {"role": "user", "content": "[Session Arc Summary]"},
         {"role": "assistant", "content": "old answer"},
         {"role": "user", "content": "latest saved question", "timestamp": 200.0},
         {"role": "assistant", "content": "latest saved answer", "timestamp": 201.0},
@@ -591,7 +591,7 @@ def test_prefer_context_reconcile_fails_closed_when_compression_anchor_ts_is_mis
 
 def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
     sidecar_context = [
-        {"role": "user", "content": "[Session Arc Summary] compacted", "timestamp": 100.0},
+        {"role": "user", "content": "[Session Arc Summary] compacted"},
         {"role": "assistant", "content": "last compacted answer"},
     ]
     state_messages = [
@@ -614,7 +614,7 @@ def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
     ]
 
 
-def test_prefer_context_reconcile_preserves_ambiguous_users_without_sidecar_timestamps():
+def test_prefer_context_reconcile_strips_mirrored_rows_without_sidecar_timestamps():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
         {"role": "user", "content": "summary"},
@@ -639,8 +639,6 @@ def test_prefer_context_reconcile_preserves_ambiguous_users_without_sidecar_time
     )
 
     assert reconciled == sidecar_context + [
-        {"role": "user", "content": "summary", "timestamp": 101.0},
-        {"role": "user", "content": "already saved", "timestamp": 500.0},
         {"role": "user", "content": "new after sidecar", "timestamp": 600.0},
     ]
 
@@ -648,7 +646,7 @@ def test_prefer_context_reconcile_preserves_ambiguous_users_without_sidecar_time
 def test_prefer_context_reconcile_starts_after_last_state_row_seen_in_context():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
-        {"role": "user", "content": "summary", "timestamp": 101.0},
+        {"role": "user", "content": "summary"},
         {"role": "assistant", "content": "old answer"},
         {"role": "assistant", "content": "later represented row"},
     ]
@@ -678,7 +676,7 @@ def test_prefer_context_reconcile_starts_after_last_state_row_seen_in_context():
 
 def test_state_db_delta_preserves_fresh_rows_before_repeated_context_message():
     sidecar_context = [
-        {"role": "user", "content": "ok", "timestamp": 1.0},
+        {"role": "user", "content": "ok"},
         {"role": "assistant", "content": "ready"},
     ]
     state_messages = [
@@ -750,7 +748,7 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     monkeypatch.setattr(routes, "title_from", models.title_from)
     monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
     monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
 
@@ -769,8 +767,21 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     )
     session.save(touch_updated_at=False)
 
+    native_result = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "vision-1"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "vision-1",
+            "content": [
+                {"type": "text", "text": "Vision result"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                {"type": "document", "document": {"id": "doc-1"}},
+            ],
+        },
+    ]
     replayed_result = previous_context + previous_context + [
         {"role": "user", "content": "simple follow-up"},
+        *native_result,
         {"role": "assistant", "content": "short answer"},
     ]
 
@@ -795,11 +806,45 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
 
     assert handler.status == 200
     reloaded = Session.load(session.session_id)
-    assert reloaded.context_messages == previous_context + [
+    assert reloaded is not None
+
+    # Stable per-message ids (#context-message-stable-id) are now stamped on
+    # context rows; compare on the semantic fields so the dedup invariant is
+    # still what is under test. Build ``expected`` from fresh literals: the id
+    # stamping mutates the shared result dicts in place, and this test reuses the
+    # same objects for its result and its previous_context.
+    def _no_id(rows):
+        return [{k: v for k, v in m.items() if k != "id"} for m in rows]
+
+    expected = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
+        {"role": "assistant", "content": "previous answer"},
         {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "vision-1"}]},
+        {
+            "role": "tool",
+            "tool_call_id": "vision-1",
+            "content": [
+                {"type": "text", "text": "Vision result"},
+                {"type": "text", "text": "[screenshot]"},
+                {"type": "document", "document": {"id": "doc-1"}},
+            ],
+        },
         {"role": "assistant", "content": "short answer"},
     ]
-    assert reloaded.context_messages.count(previous_context[0]) == 1
+    assert _no_id(reloaded.context_messages) == expected
+    assert "data:image" not in json.dumps(reloaded.context_messages)
+    assert "data:image" not in json.dumps(reloaded.messages)
+    assert any(row.get("tool_call_id") == "vision-1" for row in reloaded.context_messages)
+    assert any(row.get("tool_call_id") == "vision-1" for row in reloaded.messages)
+    assert _no_id(reloaded.context_messages).count(expected[0]) == 1
+    # The new turn's rows carry unique stable ids. (This session preloads
+    # id-less legacy rows, which stay id-less until they age out of context;
+    # brand-new sessions get full id coverage since previous_context is empty.)
+    new_ids = [m.get("id") for m in reloaded.context_messages[-2:]]
+    assert all(isinstance(i, int) for i in new_ids)
+    assert len(set(new_ids)) == 2
 
 
 def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_path):

@@ -1,11 +1,34 @@
 # Stable Assistant Turn Anchors for Live-to-Final Rendering
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Author:** @franksong2702
 - **Created:** 2026-06-10
+- **Updated:** 2026-07-16
 - **Tracking issue:** [#3926](https://github.com/nesquena/hermes-webui/issues/3926)
 - **Parent contract:** [Live-to-Final Assistant Replies](./live-to-final-assistant-replies.md) ([#3400](https://github.com/nesquena/hermes-webui/issues/3400))
 - **Related RFCs:** [Transparent Stream](./transparent-stream-activity-mode.md), [Hermes Run Adapter Contract](./hermes-run-adapter-contract.md), [WebUI Run State Consistency Contract](./webui-run-state-consistency-contract.md), [Turn Journal](./turn-journal.md), [Pending Intent Controls](./webui-pending-intent-controls.md)
+
+## Implementation Status
+
+The RFC's core presentation/reconciliation path is implemented. Current
+`master` includes the event normalizer and registry, settled final-answer
+projection, ordered `activity_scene_v1`, live Compact Worklog rendering,
+Transparent Stream rendering, run-journal hydration, session re-entry,
+transcript-backed scene persistence, and explicit fallback ownership for
+historical or non-anchor transcripts.
+
+`Implemented` does not mean every adjacent hardening item is complete. The
+remaining work is tracked under [#3400](https://github.com/nesquena/hermes-webui/issues/3400)
+and should land as separate slices:
+
+- replace presentation-layer text/prefix de-echo heuristics with provenance or
+  event identity without deleting legitimate repeated model output;
+- make newer journal/replay evidence explicitly outrank stale `INFLIGHT`
+  first-paint state;
+- finish stable `run_id` versus transport `stream_id` separation;
+- complete the Phase 6 Artifact/side-effect ownership path;
+- remove each legacy fallback only after its historical transcript shape can
+  hydrate an Anchor reliably.
 
 ## Problem
 
@@ -551,6 +574,38 @@ early renderers can avoid chasing `S.messages` during every paint. If settlement
 later rewrites the transcript message, the anchor must be refreshed from that
 message instead of allowing the two copies to drift silently.
 
+### Settled ownership of a restored live turn
+
+A preserved or snapshotted live-turn node is not evidence of a running turn. The
+settled assistant message is persisted a few milliseconds before the stream's
+terminal event clears the active stream id, so a live node whose stream has
+already ended can survive a transcript rebuild or a session switch and be
+appended under the settled answer, putting the same answer on screen twice
+(#6948 follow-up; upstream symptom report #2051).
+
+A live-turn node is therefore discarded only where the settled transcript is
+proved to own it: the transcript ends with a settled assistant message, no
+message still carries a live-projection marker, that settled message's
+persisted stream identity equals the id of the stream that built the live node
+— or, only where no scene identity was persisted, the markdown the stream
+produced equals the persisted message source — and the node carries nothing the
+settled rebuild could not have produced, meaning no unpersisted tool card,
+reasoning row or transparent-stream row and no second live segment.
+
+Ownership is a state proof, never a comparison of two rendered DOM trees: the
+live body comes from the streaming parser and the settled body from the
+markdown renderer, and an answer that reads the same as the previous one must
+not delete a genuinely live turn. An unrecognised node shape keeps the turn.
+Only the two branches that ADD a turn are gated; a branch that replaces a node
+cannot duplicate one.
+
+A settled activity scene projects one answer as well. A `process_prose` row
+whose text duplicates the scene's final answer — the same text, or a prefix of
+it within ten percent of its length — is dropped where both settled renderers
+take their rows, so the answer is not rebuilt as a second assistant segment
+above itself. Live rendering is unchanged: while the turn streams, the inline
+live segment is hidden and the prose row is the visible answer.
+
 ## Replay, Reload, And Reconstruction
 
 Replay/reload should reconstruct the same Assistant Turn Anchor from durable
@@ -763,6 +818,11 @@ Implementation PRs may combine adjacent low-risk phases when they preserve
 behavior and include coverage. Settlement, reconstruction, and display-mode
 changes should remain independently reviewable.
 
+Implementation reconciliation (2026-07-16): the core Phase 0-5 path has shipped.
+Phase 6 and the hardening items listed in **Implementation Status** remain
+follow-up work; the phase descriptions below are retained as the rollout
+contract that produced the current implementation.
+
 ### Phase 0: RFC and inventory
 
 - Land this RFC as design guidance.
@@ -901,6 +961,11 @@ Any implementation PR against this RFC should answer:
 - What test or manual invariant proves the behavior?
 
 ## Open Questions
+
+The first-slice and Transparent Stream sequencing questions below are retained
+as historical implementation rationale. Current open hardening questions are
+identity fallback depth, Artifact/side-effect ownership, and how far active-turn
+DOM rebuilds can be reduced without weakening recovery compatibility.
 
 ### First implementation slice size
 

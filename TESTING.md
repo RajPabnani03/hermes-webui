@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated coverage: ~11,806 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 11 languages, and hundreds of issue/PR-pinned regression tests.
+> Automated coverage: ~11,500 tests collected via `./scripts/test.sh tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 14 languages, and hundreds of issue/PR-pinned regression tests.
 > Run: `./scripts/test.sh`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
@@ -35,6 +35,24 @@ npm run lint:runtime
 # or directly:
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
+
+## Native raster redaction boundary
+
+Run `./scripts/test.sh tests/test_mpf_jpeg_redaction.py tests/test_raster_data_uri_redaction.py tests/test_security_redaction.py`.
+Native `messages[*].content[*].image_url.url` raster data may bypass text
+credential scanning only after complete container validation. MPF JPEGs require
+an APP2 MP Index with bounded TIFF entries, contiguous declared JPEG extents,
+and a complete SOF/scan/EOI sequence in each image. Gaps, overlaps, malformed
+frames, and trailing bytes fall back to text redaction. Image-shaped tool
+metadata does not acquire this exemption. This is structural validation, not
+pixel decoding or secret detection inside image metadata/pixels.
+
+`tests/fixtures/multipicture.jpg` contains two Pillow-generated 8x8 solid-color
+frames (red and blue), not private photographs; generation instructions live in
+`tests/test_mpf_jpeg_redaction.py`. The tests cover both TIFF byte orders and
+credential text appended after the final EOI. Helper timing improvements do
+not by themselves prove browser or shared-server responsiveness; verify those
+separately with a real conversation and concurrent requests.
 
 ## Python lint gate (ruff) — forward-looking, new-code-only
 
@@ -89,9 +107,90 @@ python tests/browser_smoke.py
 It is intentionally **credential-free**: it strips every `*_API_KEY` from the
 environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
-that breaks the page for everyone). A full chat golden-path E2E (send → stream →
-render → switch → reload) lives in the maintainer's private QA harness, which has
-the agent + a mock LLM provider available.
+that breaks the page for everyone).
+
+## Public conversation lifecycle gate
+
+`tests/browser_conversation_lifecycle.py` adds a public deterministic
+multi-row lifecycle gate. It drives the real composer and real WebUI server in Chromium,
+while a localhost-only fixture supplies reasoning, tool, process, and final/error
+events through the existing Hermes Gateway Runs API. The gate now covers both
+normal and terminal-error proof-matrix rows, asserting semantic activity during
+live streaming, after settlement, and after hard reload, including
+transcript-backed `activity_scene_v1` persistence and zero unexpected browser
+errors. It uses isolated temporary state and no provider credentials.
+
+```bash
+pip install -r requirements.txt playwright
+python -m playwright install --with-deps chromium
+
+# Normal-path deterministic conversation lifecycle gate.
+python tests/browser_conversation_lifecycle.py
+
+# Terminal-error lifecycle gate (new row in the proof matrix).
+LIFECYCLE_SCENARIO=terminal-error python tests/browser_conversation_lifecycle.py
+
+# Historical ID-linked transcript hydration row.
+python tests/browser_historical_transcript_hydration.py
+```
+
+To certify that the gate catches its target failure, the test owns an opt-in
+mutation that drops the browser's Anchor-scene persistence request. This command
+must fail at the hard-reload boundary:
+
+```bash
+LIFECYCLE_TEST_BITE=drop-anchor-persistence \
+  python tests/browser_conversation_lifecycle.py
+
+# Terminal-state-specific mutation bite: remove terminal row from persisted scene
+# so hard reload cannot recover terminal status.
+LIFECYCLE_SCENARIO=terminal-error \
+LIFECYCLE_TEST_BITE=drop-terminal-anchor-row \
+  python tests/browser_conversation_lifecycle.py
+
+# Historical-hydration mutation: corrupt one persisted tool-result link so the
+# strict Anchor projection must fail instead of claiming the legacy transcript.
+HISTORICAL_HYDRATION_TEST_BITE=break-tool-link \
+  python tests/browser_historical_transcript_hydration.py
+```
+
+The dedicated `Conversation lifecycle (informational)` workflow keeps the existing
+proof rows (`normal`, `terminal-error`, and `historical-transcript-hydration`)
+non-blocking while the public matrix expands. The Chromium
+`reconnect-scene-redraw` row does **not** allow failures: it exercises the real
+`loadSession` reconnect path and fails the workflow on a regression. Required
+merge checks remain a maintainer-controlled repository setting.
+The maintainer's private QA harness remains broader; later public slices will
+add cancellation, compression, and recovery coverage.
+
+### Active-session reconnect redraw gate
+
+`tests/browser_reconnect_scene_redraw.py` is an opt-in deterministic browser
+gate for reconnecting to a running session with a large Anchor activity scene.
+It uses an isolated temporary server/home and fixture SSE events—no agent,
+provider credentials, or production state. By default it checks Chromium and
+WebKit, desktop and 390px viewports, and all three activity display modes:
+
+```bash
+pip install playwright
+python -m playwright install chromium webkit
+python tests/browser_reconnect_scene_redraw.py
+```
+
+`TOOL_COUNT`, `BROWSERS`, and `MODES` narrow the matrix. `MEASURE_BASELINE=1`
+records an unoptimized baseline without enforcing the redraw ceiling;
+`METRICS_FILE` saves JSON metrics and `SCREENSHOT_DIR` saves generated-fixture
+screenshots. This gate tests page reconstruction, journal-cursor resume, and
+subsequent fixture SSE updates. It does not test a real provider/network or PWA
+service-worker cache behavior.
+
+### Streaming reader intent
+
+While a response is still streaming, scroll upward with a trackpad or wheel to
+read earlier content, including a small scroll gesture immediately after a live
+render. Subsequent streamed content must not pull the reader back to the bottom.
+Use the jump-to-latest control to resume following the live tail; after that,
+new streamed content should remain visible at the bottom.
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
@@ -556,6 +655,27 @@ EXPECT:
     ## assistant
     (response text)
 FAIL: No download triggered, file is empty, file is corrupted JSON instead of markdown.
+
+### T8.2: Create and Revoke a Public Share Link
+SETUP: A session with at least 2 visible messages (1 user + 1 assistant).
+STEPS:
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Conversation section, click "Share"
+EXPECT:
+  - A public `/share/<token>` page opens in a new tab
+  - The link is copied to the clipboard
+  - The Conversation section meta line shows that a public share is active
+  - The shared page uses the current Hermes theme/skin and shows only a read-only transcript snapshot
+FAIL: No link opens, the page requires login unexpectedly, or the shared page exposes workspace/profile/live controls.
+
+STEPS:
+  3. Return to the app and click "Stop sharing"
+  4. Confirm the revoke dialog
+EXPECT:
+  - A toast confirms the link was revoked
+  - Reopening the old share URL shows an unavailable/not found state
+  - The active-share status disappears from the Conversation section
+FAIL: The old link still loads the transcript, or the session still appears as publicly shared after revocation.
 
 ---
 
@@ -1925,8 +2045,8 @@ Bridged CLI sessions:
 
 ---
 
-*Last updated: v0.51.192, May 31, 2026; test count refreshed 2026-07-06.*
-*Total automated tests collected: ~11,806 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
+*Last updated: v0.51.792, July 1, 2026*
+*Total automated tests collected: ~11,500 (run `./scripts/test.sh tests/ --collect-only -q` for the exact current count)*
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
 *Source: <repo>/*

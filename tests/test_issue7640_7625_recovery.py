@@ -65,6 +65,8 @@ const dismissReconnect=noop, syncTopbar=noop, showToast=noop, clearLiveToolCards
 const renderMessages=()=>rendered++, _renderMessagesWithScrollSnapshot=renderMessages;
 const setStatus = text => {throw Error(text)};
 const t = x => x, getPendingSessionMessage = () => null, $ = () => ({}), send=noop;
+const _deliberateSessionModelPick = () => null, _reArmRecoveryPick = noop, autoResize = noop;
+const _mergePendingSessionMessage = noop;
 const session = {session_id:'s',messages:[{role:'assistant',content:'Final answer'}],
   tool_calls:[{name:'terminal'}],_messages_truncated:true,_messages_offset:4973};
 async function api(url, options) {
@@ -86,11 +88,11 @@ async function api(url, options) {
 """)
 
 
-def test_compression_preflight_does_not_fetch_or_erase_history():
+def test_compression_preflight_fetches_only_a_bounded_tail():
     run(function("commands.js", "_runManualCompression") + r"""
 const assert = require('node:assert/strict');
-const messages = [{role:'assistant',content:'Existing reply'}], tools=[{name:'terminal'}];
-const S = {session:{session_id:'s'},messages,toolCalls:tools};
+const tail = [{role:'assistant',content:'Tail reply'}], tailTools=[{name:'terminal'}];
+const S = {session:{session_id:'s'},messages:[{role:'assistant',content:'stale'}],toolCalls:[]};
 let _messagesTruncated=true, _oldestIdx=4973;
 const t=x=>x, setBusy=()=>{}, renderMessages=()=>{};
 const showToast=text=>{throw Error(text)};
@@ -99,13 +101,16 @@ const _compressionAnchorMessageKey=()=>'';
 const _applyManualCompressionResult=async()=>{};
 async function api(url) {
   if(url.includes('?')) {
-    assert.equal(new URL(url,'http://test').searchParams.get('messages'),'0');
-    return {session:{session_id:'s',messages:[],tool_calls:[]}};
+    const q = new URL(url,'http://test').searchParams;
+    assert.equal(q.get('messages'),'1');
+    assert.equal(q.get('msg_limit'),'30');
+    return {session:{session_id:'s',messages:tail,tool_calls:tailTools,
+      _messages_truncated:false,_messages_offset:0}};
   }
-  assert.equal(S.messages,messages);
-  assert.equal(S.toolCalls,tools);
-  assert.equal(_messagesTruncated,true);
-  assert.equal(_oldestIdx,4973);
+  assert.equal(S.messages,tail);
+  assert.equal(S.toolCalls,tailTools);
+  assert.equal(_messagesTruncated,false);
+  assert.equal(_oldestIdx,0);
   return {status:'done'};
 }
 _runManualCompression('').catch(e=>{console.error(e);process.exit(1)});
@@ -142,7 +147,7 @@ const renderMessages=()=>{rendered=true};
 const document={getElementById:id=>rendered?{scrollIntoView:()=>{jumped=id}}:null};
 const window={setTimeout:callback=>callback()};
 async function api(url) {
-  assert.equal(new URL(url,'http://test').searchParams.has('msg_limit'),false);
+  assert.equal(new URL(url,'http://test').searchParams.get('msg_limit'),'all');
   return {session:{messages:[{role:'user',content:'All history'}]}};
 }
 _jumpToMessage(4);

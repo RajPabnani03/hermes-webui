@@ -163,6 +163,8 @@ def test_read_importable_agent_session_rows_closes_connection(tmp_path, tracking
         read_importable_agent_session_rows(db)
 
     _assert_all_closed(tracking_sqlite, "read_importable_agent_session_rows")
+    # #5455: the listing is strictly read-only, including when indexes are
+    # missing — five calls, five read-only connections, no self-heal writer.
     assert len(tracking_sqlite.instances) == 5
 
 
@@ -202,7 +204,7 @@ def test_get_cli_session_messages_closes_connection(tmp_path, tracking_sqlite, m
 
 
 def test_delete_cli_session_closes_connection(tmp_path, tracking_sqlite, monkeypatch):
-    """`delete_cli_session` must close its sqlite connection (also keeps explicit commit working)."""
+    """The scoped delete transaction must close its sqlite connection."""
     db = tmp_path / "state.db"
     _make_state_db(db)
 
@@ -215,9 +217,9 @@ def test_delete_cli_session_closes_connection(tmp_path, tracking_sqlite, monkeyp
     deleted = delete_cli_session("s1")
     assert deleted is True, "delete_cli_session should report the row was removed"
 
-    # Second call: row gone, nothing to delete — connection must still close cleanly.
+    # Second call is idempotent; its connection must still close cleanly.
     deleted_again = delete_cli_session("s1")
-    assert deleted_again is False
+    assert deleted_again is True
 
     _assert_all_closed(tracking_sqlite, "delete_cli_session")
     # First call commits; second call short-circuits but still opens+closes a connection.

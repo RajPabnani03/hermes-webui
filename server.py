@@ -10,11 +10,10 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-# Ignore SIGPIPE so a dropped client only aborts that write, not the whole WebUI process.
-_SIGPIPE = getattr(signal, "SIGPIPE", None)
-if _SIGPIPE is not None:
-    signal.signal(_SIGPIPE, signal.SIG_IGN)
+def _ignore_sigpipe() -> None:
+    """Keep broken client writes from terminating the server process."""
+    if (sigpipe := getattr(signal, "SIGPIPE", None)) is not None:
+        signal.signal(sigpipe, signal.SIG_IGN)
 
 # Test-mode network isolation keeps subprocess-backed tests hermetic.
 if os.environ.get("HERMES_WEBUI_TEST_NETWORK_BLOCK", "").strip() in ("1", "true", "yes"):
@@ -98,18 +97,28 @@ except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
 from urllib.parse import urlparse
 
+# Agent's isolated interpreter relaunch uses runpy.run_path(), which does not
+# put this script's directory on sys.path. Restore it before local imports.
+_webui_root = os.path.dirname(os.path.abspath(__file__))
+if _webui_root not in sys.path:
+    sys.path.insert(0, _webui_root)
+from managed_agent_startup import activate_managed_agent
+activate_managed_agent()
+
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth
+from api.request_logging import emit_request_log
+from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
+    advertise_connection_close,
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -332,6 +341,7 @@ class Handler(BaseHTTPRequestHandler):
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -339,10 +349,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _safe_webui_print(message: str) -> None:
         """Emit a request log line without letting logging break responses."""
-        try:
-            print(message, flush=True)
-        except Exception:
-            pass
+        emit_request_log(message)
 
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
@@ -373,13 +380,14 @@ class Handler(BaseHTTPRequestHandler):
         self._safe_webui_print(f'[webui] {record}')
 
     def do_GET(self) -> None:
-        self._req_t0 = time.time()
+        self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            # Body-pending-aware: a body-bearing GET failing auth would poison reuse (#7550).
+            if not check_auth_or_close(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -398,16 +406,14 @@ class Handler(BaseHTTPRequestHandler):
             clear_request_profile()
 
     def _handle_write(self, route_func) -> None:
-        self._req_t0 = time.time()
+        self._req_t0 = time.time(); reset_trusted_auth_request_state(self)
         cookie_profile = get_profile_cookie(self)
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            _is_csp_report_post = (
-                parsed.path == "/api/csp-report" and self.command == "POST"
-            )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            _is_csp_report_post = parsed.path == "/api/csp-report" and self.command == "POST"
+            if not _is_csp_report_post and not check_auth_or_close(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -435,12 +441,13 @@ class Handler(BaseHTTPRequestHandler):
         self._handle_write(handle_patch)
 
     def do_OPTIONS(self) -> None:
-        """Handle CORS preflight requests."""
+        """Handle CORS preflight requests (headers emitted by api.routes)."""
         self._req_t0 = time.time()
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        apply_cors_preflight_headers(self)
+        # Frame the empty preflight: without Content-Length an HTTP/1.1 keep-alive
+        # 200 is read-until-close, hanging the client until the 30s timeout.
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_DELETE(self) -> None:
@@ -546,6 +553,8 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+
+    _ignore_sigpipe()
 
     # Crash visibility FIRST (issue #4633): enable faulthandler + excepthooks +
     # exit audit before any heavy startup work so a native crash or a daemon /
@@ -668,6 +677,7 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
+    from api.gateway_chat import resume_gateway_runs_after_restart; resume_gateway_runs_after_restart()  # bound, not yet serving
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
@@ -688,6 +698,36 @@ def main() -> None:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
+
+    # ctl.sh stops the WebUI with SIGTERM. Python's default SIGTERM handler
+    # terminates the process WITHOUT unwinding the try/finally around
+    # serve_forever(), so drain_all_on_shutdown() (which flushes in-flight
+    # fire-and-forget memory commits) would never run on the normal managed
+    # stop. Install a handler that requests an orderly shutdown so
+    # serve_forever() returns and the existing `finally` block drains cleanly.
+    #
+    # httpd.shutdown() blocks until serve_forever() has exited and MUST NOT be
+    # called from the thread running serve_forever() (it would deadlock), so we
+    # dispatch it from a short-lived helper thread. The handler is idempotent
+    # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
+    _shutdown_requested = threading.Event()
+
+    def _request_shutdown(signum, _frame):
+        if _shutdown_requested.is_set():
+            return
+        _shutdown_requested.set()
+        threading.Thread(
+            target=httpd.shutdown,
+            name="webui-sigterm-shutdown",
+            daemon=True,
+        ).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _request_shutdown)
+        signal.signal(signal.SIGINT, _request_shutdown)  # Ctrl-C / ctl.sh daemons (#7078)
+    except (ValueError, OSError):
+        logger.debug("Could not install shutdown signal handlers", exc_info=True)
+
     try:
         httpd.serve_forever()
     finally:
@@ -713,6 +753,5 @@ def main() -> None:
             stop_session_channel_reaper()
         except Exception:
             logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
-
 if __name__ == '__main__':
     main()

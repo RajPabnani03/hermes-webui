@@ -147,13 +147,14 @@ class TestCancelledTurnPersistenceGuards:
 
     def test_streamed_progress_without_final_assistant_still_reports_error(self):
         src = _read("api/streaming.py")
-        failure_idx = src.find("_terminal_failure = (")
-        assert failure_idx != -1, "terminal-failure guard not found"
+        failure_idx = src.find("_is_agent_result_terminal = _agent_result_terminal_failure(result)")
+        assert failure_idx != -1, "terminal-failure result guard not found"
         apperror_idx = src.find("put('apperror', _error_payload)", failure_idx)
         assert apperror_idx != -1, "terminal-failure guard must emit apperror"
         block = src[failure_idx:apperror_idx]
 
-        assert "_agent_result_terminal_failure(result)" in block
+        assert "_is_agent_result_terminal = _agent_result_terminal_failure(result)" in block
+        assert "_is_agent_result_terminal" in block
         assert "if _terminal_failure or (not _assistant_added and not _token_sent):" in block, (
             "Explicit terminal failures, including compression/tool-tail failures, must report "
             "an error even when interim progress already streamed."
@@ -218,7 +219,9 @@ class TestCancelledTurnPersistenceGuards:
         assert "const _applyCancelSessionPayload=(sessionPayload)=>" in block
         assert "const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;" in block
         assert "if(_applyCancelSessionPayload(_cancelSessionPayload)) return;" in block
-        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);" in block
+        # #7310/#7625: the HTTP fallback is a bounded tail now — the full
+        # transcript was being re-walked/re-redacted on every cancel recovery.
+        assert "const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);" in block
         assert block.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;") < block.index("const data=await api("), (
             "Cancel handler must apply the terminal SSE session payload before falling back "
             "to /api/session so captured _partial reasoning/tool rows are visible immediately."
