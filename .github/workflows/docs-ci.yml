@@ -43,6 +43,7 @@ permissions:
 
 jobs:
   docs-ci:
+    if: github.repository == 'nesquena/hermes-webui'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:

@@ -8,6 +8,7 @@ on:
 
 jobs:
   release:
+    if: github.repository == 'nesquena/hermes-webui'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required: create GitHub Release
