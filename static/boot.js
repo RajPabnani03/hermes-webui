@@ -1584,6 +1584,7 @@ window.renderTranscript=function(container, messages, opts){
   let _browserTtsKeepAlive=null;
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
+  let _thinkingWatchdog=null;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
   //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
   //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
@@ -1629,8 +1630,40 @@ window.renderTranscript=function(container, messages, opts){
     },10000);
   }
 
+  function _clearThinkingWatchdog(){
+    if(_thinkingWatchdog){
+      clearInterval(_thinkingWatchdog);
+      _thinkingWatchdog=null;
+    }
+  }
+
+  // The 'thinking' pin is released by a stream-terminal event reaching
+  // window._voiceModeOnResponseComplete. If the turn died without any
+  // terminal event (e.g. send() failed before the SSE opened) nothing
+  // re-arms the mic, so poll for a sustained stretch with no live run and
+  // recover to listening instead of pinning at 'thinking' forever.
+  function _armThinkingWatchdog(){
+    _clearThinkingWatchdog();
+    let idlePolls=0;
+    _thinkingWatchdog=setInterval(()=>{
+      if(!_voiceModeActive||_voiceModeState!=='thinking'){
+        _clearThinkingWatchdog();
+        return;
+      }
+      const live=(typeof S!=='undefined'&&S)&&(S.busy||S.activeStreamId);
+      idlePolls=live?0:idlePolls+1;
+      if(idlePolls>=3){
+        _clearThinkingWatchdog();
+        _voiceModeThinkingSid=null;
+        _startListening();
+      }
+    },4000);
+  }
+
   function _setState(state){
     _voiceModeState=state;
+    if(state==='thinking') _armThinkingWatchdog();
+    else _clearThinkingWatchdog();
     indicator.className='voice-mode-indicator '+state;
     label.textContent=state==='listening'?t('voice_listening')
       :state==='speaking'?t('voice_speaking')
@@ -1661,6 +1694,7 @@ window.renderTranscript=function(container, messages, opts){
     _recognition.onresult=(event)=>{
       // Reset silence timer on any result
       clearTimeout(_silenceTimer);
+      _silenceTimer=null;
       let interim='';
       let final=_finalText;
       for(let i=event.resultIndex;i<event.results.length;i++){
@@ -1680,10 +1714,18 @@ window.renderTranscript=function(container, messages, opts){
     };
 
     _recognition.onend=()=>{
-      clearTimeout(_silenceTimer);
-      // If we have text and haven't sent yet, send it
+      // Chromium endpointing fires onend well before the configured silence
+      // grace elapses, so an armed _silenceTimer must keep sole ownership of
+      // the auto-send — clearing it here and sending immediately cuts paused
+      // utterances short. Arm it only if none is pending (e.g. onend without
+      // a preceding final result).
       if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
-        _voiceModeSend();
+        if(!_silenceTimer){
+          _silenceTimer=setTimeout(()=>{
+            _silenceTimer=null;
+            if(_voiceModeActive&&_voiceModeState==='listening') _voiceModeSend();
+          },_voiceSilenceMs());
+        }
       } else if(_voiceModeActive&&_voiceModeState==='listening'){
         // No speech detected — restart listening
         setTimeout(()=>{ if(_voiceModeActive) _startListening(); },500);
@@ -1692,6 +1734,7 @@ window.renderTranscript=function(container, messages, opts){
 
     _recognition.onerror=(event)=>{
       clearTimeout(_silenceTimer);
+      _silenceTimer=null;
       if(event.error==='no-speech'||event.error==='aborted'){
         // Restart if still active
         if(_voiceModeActive){
@@ -1719,6 +1762,8 @@ window.renderTranscript=function(container, messages, opts){
 
   function _voiceModeSend(){
     if(!_voiceModeActive) return;
+    clearTimeout(_silenceTimer);
+    _silenceTimer=null;
     const text=(ta.value||'').trim();
     if(!text){
       ta.value='';
@@ -1996,14 +2041,6 @@ window.renderTranscript=function(container, messages, opts){
     }
   };
 
-  // Observe S.busy changes to detect response completion
-  // The existing code calls setBusy(false) when response completes
-  const _origSetBusy=(typeof setBusy==='function')?setBusy.bind(window):null;
-  if(_origSetBusy){
-    // We use a MutationObserver-style approach via polling S.busy
-    // Actually, we'll use a simpler approach: hook into the message stream completion
-  }
-
   // Most reliable hook: use the existing autoReadLastAssistant call site.
   // We override autoReadLastAssistant so that if voice mode is active, we use our
   // own speak-and-resume flow instead of the default auto-read.
@@ -2044,7 +2081,9 @@ window.renderTranscript=function(container, messages, opts){
     _setButtonTooltip(modeBtn, t('voice_mode_toggle'));
     bar.style.display='none';
     clearTimeout(_silenceTimer);
+    _silenceTimer=null;
     _clearBrowserTtsRecovery();
+    _clearThinkingWatchdog();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
     _recognition=null;
     if(typeof stopTTS==='function') stopTTS();

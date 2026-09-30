@@ -2400,6 +2400,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
+      // #5867: every terminal stream path (done, apperror, cancel, network
+      // error, stream_end fallback, settled-restore) funnels through this
+      // idle transition — release voice mode's 'thinking' pin on all of them,
+      // not just the done handler's autoReadLastAssistant call.
+      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete();
     }
   }
   function persistInflightState(){
