@@ -2051,11 +2051,19 @@ window.renderTranscript=function(container, messages, opts){
     // details.outcome comes from the terminal that reached the idle funnel.
     // A no-arg call (legacy/extension callers) keeps the original speak path.
     const outcome=(details&&details.outcome)||'done';
+    // The funnel also reports which session's stream settled. Voice mode is
+    // owned by _voiceModeThinkingSid — a terminal from another session's
+    // (background) stream must not release this session's thinking state.
+    if(details&&details.sessionId&&details.sessionId!==_voiceModeThinkingSid) return;
     if(outcome!=='done'){
       // cancel/error/settled-without-done: the last assistant row is a
       // partial reply or a terminal marker — clear thinking and go straight
-      // back to listening without reading it aloud.
+      // back to listening without reading it aloud. A non-empty composer is
+      // a draft restored by a failed send — hold 'thinking' so the resumed
+      // recognition can't overwrite it (the watchdog resumes once the user
+      // retries or clears it).
       _voiceModeThinkingSid=null;
+      if(ta.value&&ta.value.trim()) return;
       _startListening();
       return;
     }

@@ -23,6 +23,14 @@ Follow-up review hardening (terminal outcome handling):
   new stream.
 - The thinking watchdog holds when send() restored a non-empty draft into
   the composer — resuming recognition would overwrite it.
+
+Second review hardening (stream ownership):
+- The funnel also reports which session's stream settled ({sessionId:
+  activeSid, streamId}); the hook returns unless that id matches
+  _voiceModeThinkingSid, so a background stream's terminal can't release
+  the voice-mode owner of a different session.
+- Non-done outcomes also hold 'thinking' while the composer holds a
+  restored draft — the funnel path bypasses the watchdog's draft guard.
 """
 
 from __future__ import annotations
@@ -94,6 +102,10 @@ def test_idle_funnel_invokes_voice_mode_completion_hook():
     assert "window._voiceModeOnResponseComplete" in idle_body, (
         "the shared idle transition must release voice mode's 'thinking' pin"
     )
+    # The hook must learn which session's stream settled — a background
+    # terminal must not release the owner pinned to another session.
+    assert "sessionId:activeSid" in idle_body
+    assert "streamId:streamId" in idle_body
 
 
 def test_every_terminal_path_reaches_the_idle_funnel():
@@ -174,6 +186,10 @@ def test_response_complete_hook_defined():
     # Terminal outcome gates speech: only an explicit 'done' may read the
     # last assistant row aloud; cancel/error resume listening silently.
     assert "details.outcome" in hook
+    # Stream-ownership gate: a terminal whose sessionId differs from the
+    # pinned voice-mode owner is ignored entirely.
+    assert "details.sessionId" in hook
+    assert "_voiceModeThinkingSid" in hook
     # The deferred speak re-checks that the scheduling turn still owns the
     # 'thinking' state before reading anything aloud.
     assert "_voiceModeTurnSeq" in hook
@@ -396,9 +412,27 @@ def test_onend_without_text_restarts_listening():
 
 _FUNNEL_SETUP = r"""
 // _setActivePaneIdleIfOwner's closure deps — route the cancel terminal
-// through the real funnel, not a direct hook call.
+// through the real funnel, not a direct hook call. activeSid/streamId are
+// attachLiveStream's closure params in the real code: they name the stream
+// that settled (the terminal's source), not the UI's active session.
+let activeSid = 'sid-5867';
+let streamId = 'st-1';
 function _isActiveSession() { return true; }
 const INFLIGHT = { 'sid-5867': { messages: [] } };
+let setBusyCalls = [];
+function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
+function setComposerStatus() {}
+function setStatus() {}
+"""
+
+_FUNNEL_SETUP_BACKGROUND = r"""
+// A background stream's terminal: the UI session ('sid-5867') is not the
+// stream's owner, and the owner session has no INFLIGHT entry — the broad
+// idle condition still admits the hook call, so ownership must gate inside it.
+let activeSid = 'bg-sid';
+let streamId = 'st-bg';
+function _isActiveSession() { return false; }
+const INFLIGHT = {};
 let setBusyCalls = [];
 function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
 function setComposerStatus() {}
@@ -532,6 +566,95 @@ def test_stale_done_callback_cannot_speak_over_new_turn():
     )
     assert out["sendCalls"] == 2
     assert out["state"] == "thinking"
+
+
+@pytestmark_node
+def test_background_terminal_cannot_release_voice_owner():
+    """Session B owns voice mode ('thinking', failed-send draft restored in
+    the composer) while background stream A settles. The broad idle
+    condition admits the hook call (_isActiveSession false, no INFLIGHT[B]),
+    but A's terminal must not release B: state, owner token, and draft are
+    untouched and recognition does not resume."""
+    script = (
+        _harness(
+            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
+        )
+        + _FUNNEL_SETUP_BACKGROUND
+        + r"""
+    _startListening();
+    _recInstance.onresult({
+      resultIndex: 0,
+      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
+    });
+    // grace (~300ms) -> _voiceModeSend pins _voiceModeThinkingSid='sid-5867'
+    // and enters 'thinking'.
+    setTimeout(() => {
+      ta.value = 'restored draft';  // send() failure restored the draft
+      S.busy = false;               // B's send is between admission stages
+      _setActivePaneIdleIfOwner('error'); // stream A's terminal reaches the funnel
+    }, 450);
+    setTimeout(() => {
+      console.log(JSON.stringify({
+        calls, state: _voiceModeState,
+        owner: _voiceModeThinkingSid, draft: ta.value,
+      }));
+      process.exit(0);
+    }, 1000);
+    """
+    )
+    out = _run_node(script)
+    # The only 'listen' is the initial _startListening() — nothing after the
+    # background terminal may resume recognition or speak for session B.
+    assert out["calls"].count("listen") == 1 and "speak" not in out["calls"], (
+        f"background terminal must not touch the other session's voice mode: {out}"
+    )
+    assert out["state"] == "thinking"
+    assert out["owner"] == "sid-5867"
+    assert out["draft"] == "restored draft"
+
+
+@pytestmark_node
+def test_error_terminal_preserves_restored_draft():
+    """Same-session complement: B's own error terminal with a restored draft
+    in the composer holds 'thinking' instead of resuming recognition over
+    the draft. Clearing the draft lets the watchdog resume listening."""
+    script = (
+        _harness(
+            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
+        )
+        + _FUNNEL_SETUP
+        + r"""
+    _startListening();
+    _recInstance.onresult({
+      resultIndex: 0,
+      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
+    });
+    setTimeout(() => {
+      ta.value = 'restored draft';
+      S.busy = false; S.activeStreamId = null;
+      _setActivePaneIdleIfOwner('error'); // B's own terminal
+    }, 450);
+    setTimeout(() => {
+      calls.push(['withDraft', _voiceModeState, ta.value]);
+      ta.value = '';                    // user clears the restored draft
+    }, 750);
+    setTimeout(() => {
+      calls.push(['afterClear', _voiceModeState]);
+      console.log(JSON.stringify(calls));
+      process.exit(0);
+    }, 1000);
+    """
+    )
+    calls = _run_node(script)
+    with_draft = next(c for c in calls if c[0] == "withDraft")
+    after_clear = next(c for c in calls if c[0] == "afterClear")
+    assert "speak" not in calls
+    assert with_draft[1] == "thinking" and with_draft[2] == "restored draft", (
+        f"error terminal must not resume recognition over a restored draft: {calls}"
+    )
+    assert after_clear[1] == "listening", (
+        f"clearing the draft must let the watchdog resume listening: {calls}"
+    )
 
 
 @pytestmark_node

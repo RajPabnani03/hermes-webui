@@ -2407,7 +2407,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // tells voice mode whether the last assistant row is speakable: only
       // an explicit 'done' may read it aloud; cancel/error/settled restores
       // resume listening silently so Stop doesn't read partial work back.
-      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({outcome:outcome||'settled'});
+      // sessionId/streamId name the stream that settled (this closure's
+      // activeSid) so a background terminal can't release the voice-mode
+      // owner pinned to a different session.
+      if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({outcome:outcome||'settled',sessionId:activeSid,streamId:streamId});
     }
   }
   function persistInflightState(){
