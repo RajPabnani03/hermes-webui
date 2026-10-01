@@ -1585,6 +1585,11 @@ window.renderTranscript=function(container, messages, opts){
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
   let _thinkingWatchdog=null;
+  // Deferred done->speak callback and the turn that scheduled it. A stale
+  // timer must never speak a previous turn's reply over a new stream, so
+  // every fresh 'thinking' claim bumps the seq and cancels the pending call.
+  let _voiceModeResponseTimer=null;
+  let _voiceModeTurnSeq=0;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
   //   hermes-voice-silence-ms, pause duration before auto-send (ms, default 1800)
   //   hermes-voice-continuous, keep mic open across natural pauses ("true"/"false", default false)
@@ -1653,6 +1658,13 @@ window.renderTranscript=function(container, messages, opts){
       const live=(typeof S!=='undefined'&&S)&&(S.busy||S.activeStreamId);
       idlePolls=live?0:idlePolls+1;
       if(idlePolls>=3){
+        if(ta.value&&ta.value.trim()){
+          // send() restored an unsent draft into the composer — resuming
+          // recognition now would overwrite it with the next result. Keep
+          // polling: a retry goes through _voiceModeSend, and clearing the
+          // draft lets the next poll resume listening.
+          return;
+        }
         _clearThinkingWatchdog();
         _voiceModeThinkingSid=null;
         _startListening();
@@ -1662,7 +1674,11 @@ window.renderTranscript=function(container, messages, opts){
 
   function _setState(state){
     _voiceModeState=state;
-    if(state==='thinking') _armThinkingWatchdog();
+    if(state==='thinking'){
+      _voiceModeTurnSeq+=1;
+      if(_voiceModeResponseTimer){clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;}
+      _armThinkingWatchdog();
+    }
     else _clearThinkingWatchdog();
     indicator.className='voice-mode-indicator '+state;
     label.textContent=state==='listening'?t('voice_listening')
@@ -2030,15 +2046,30 @@ window.renderTranscript=function(container, messages, opts){
   // We patch setComposerStatus to detect when a response completes
   const _origSetComposerStatus=(typeof setComposerStatus==='function')?setComposerStatus.bind(window):null;
 
-  window._voiceModeOnResponseComplete=function(){
-    if(_voiceModeActive&&_voiceModeState==='thinking'){
-      // Small delay to let DOM render the final message
-      setTimeout(()=>{
-        if(_voiceModeActive&&_voiceModeState==='thinking'){
-          _speakResponse();
-        }
-      },400);
+  window._voiceModeOnResponseComplete=function(details){
+    if(!_voiceModeActive||_voiceModeState!=='thinking') return;
+    // details.outcome comes from the terminal that reached the idle funnel.
+    // A no-arg call (legacy/extension callers) keeps the original speak path.
+    const outcome=(details&&details.outcome)||'done';
+    if(outcome!=='done'){
+      // cancel/error/settled-without-done: the last assistant row is a
+      // partial reply or a terminal marker — clear thinking and go straight
+      // back to listening without reading it aloud.
+      _voiceModeThinkingSid=null;
+      _startListening();
+      return;
     }
+    // Small delay to let DOM render the final message. Capture the owning
+    // turn: a user may start a new turn inside that window and re-pin state
+    // at 'thinking', so fire only while this turn still owns voice mode.
+    const turnSeq=_voiceModeTurnSeq;
+    if(_voiceModeResponseTimer) clearTimeout(_voiceModeResponseTimer);
+    _voiceModeResponseTimer=setTimeout(()=>{
+      _voiceModeResponseTimer=null;
+      if(_voiceModeActive&&_voiceModeState==='thinking'&&turnSeq===_voiceModeTurnSeq){
+        _speakResponse();
+      }
+    },400);
   };
 
   // Most reliable hook: use the existing autoReadLastAssistant call site.
@@ -2082,6 +2113,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
+    if(_voiceModeResponseTimer){clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;}
     _clearBrowserTtsRecovery();
     _clearThinkingWatchdog();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
