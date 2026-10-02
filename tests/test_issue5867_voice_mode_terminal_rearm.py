@@ -14,31 +14,22 @@ Two defects fixed in static/boot.js + static/messages.js:
    ownership of the auto-send instead of onend clearing it and sending
    immediately.
 
-Follow-up review hardening (terminal outcome handling):
-- The funnel now passes an outcome into the hook: only 'done' speaks the
-  last assistant row; cancel/error/settled terminals resume listening
-  silently instead of reading the partial reply or cancel marker aloud.
+Review hardening folded into the fix:
+- The funnel reports {outcome, sessionId, streamId} for the stream that
+  settled: only 'done' speaks the last assistant row; cancel/error/settled
+  resume listening silently; a terminal whose sessionId differs from
+  _voiceModeThinkingSid is ignored entirely.
 - The deferred done->speak callback captures a turn token; a new 'thinking'
-  claim invalidates any stale timer so a previous turn can't speak over a
-  new stream.
-- The thinking watchdog holds when send() restored a non-empty draft into
-  the composer — resuming recognition would overwrite it.
-
-Second review hardening (stream ownership):
-- The funnel also reports which session's stream settled ({sessionId:
-  activeSid, streamId}); the hook returns unless that id matches
-  _voiceModeThinkingSid, so a background stream's terminal can't release
-  the voice-mode owner of a different session.
-- Non-done outcomes also hold 'thinking' while the composer holds a
-  restored draft — the funnel path bypasses the watchdog's draft guard.
-
-Third review hardening (busy judgment + send ownership):
+  claim invalidates stale timers.
+- 'thinking' holds while the composer holds a restored draft (watchdog and
+  funnel paths alike) — resuming recognition would overwrite it.
 - The watchdog's liveness check is `INFLIGHT[pin] || S.busy ||
-  S.activeStreamId` — a visible session that is itself streaming counts as
-  busy, so a background terminal can't reopen the mic over a live run.
+  S.activeStreamId`: the pinned turn's inflight run and the visible
+  session's own stream both count, so neither an idle-switch nor a
+  background terminal can reopen the mic over a live run.
 - The silence timer binds its pending send to the arming session and
-  utterance; a mid-grace chat switch or replaced composer bails back to
-  listening, and cross-session loadSession cancels the timer outright.
+  utterance; a mid-grace switch or replaced composer bails to listening,
+  and cross-session loadSession cancels the timer outright.
 """
 
 from __future__ import annotations
@@ -60,44 +51,28 @@ SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
+def _brace_block(src: str, start: int) -> str:
+    """Return the balanced {...} block starting at the first '{' after start."""
+    brace = src.find("{", start)
+    assert brace >= 0, "opening brace not found"
+    depth = 0
+    for i in range(brace, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        if depth == 0:
+            return src[brace : i + 1]
+    raise AssertionError("unbalanced braces")
+
+
 def _extract_block(src: str, marker: str) -> str:
-    """Extract a {...} block starting at the first brace after `marker`."""
     start = src.find(marker)
     assert start >= 0, f"{marker!r} not found"
-    brace = src.find("{", start)
-    assert brace >= 0, f"{marker!r}: opening brace not found"
-    depth = 1
-    i = brace + 1
-    while i < len(src) and depth:
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-        i += 1
-    assert depth == 0, f"{marker!r}: unbalanced braces"
-    return src[brace:i]
+    return _brace_block(src, start)
 
 
 def _extract_window_assign(src: str, name: str) -> str:
-    marker = f"window.{name}=function"
-    start = src.find(marker)
+    start = src.find(f"window.{name}=function")
     assert start >= 0, f"window.{name} assignment not found"
-    return _extract_block_from(src, start)
-
-
-def _extract_block_from(src: str, start: int) -> str:
-    brace = src.find("{", start)
-    assert brace >= 0
-    depth = 1
-    i = brace + 1
-    while i < len(src) and depth:
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-        i += 1
-    assert depth == 0
-    return src[start:i] + ";"
+    return src[start : src.find("{", start)] + _brace_block(src, start) + ";"
 
 
 # --------------------------------------------------------------------------
@@ -111,33 +86,35 @@ def test_idle_funnel_invokes_voice_mode_completion_hook():
     assert "window._voiceModeOnResponseComplete" in idle_body, (
         "the shared idle transition must release voice mode's 'thinking' pin"
     )
-    # The hook must learn which session's stream settled — a background
-    # terminal must not release the owner pinned to another session.
+    # The hook learns which stream settled — a background terminal must not
+    # release the owner pinned to another session.
     assert "sessionId:activeSid" in idle_body
     assert "streamId:streamId" in idle_body
 
 
 def test_every_terminal_path_reaches_the_idle_funnel():
-    # done keeps the happy-path autoRead hook AND flows through the funnel
-    # with an explicit 'done' outcome (the only speakable terminal).
+    # done keeps the autoRead hook AND flows through the funnel with an
+    # explicit 'done' outcome — the only speakable terminal.
     done_body = _extract_block(MESSAGES_JS, "source.addEventListener('done'")
     assert "autoReadLastAssistant" in done_body
     assert "_setActivePaneIdleIfOwner('done');" in done_body
 
-    apperror_body = _extract_block(MESSAGES_JS, "source.addEventListener('apperror'")
-    assert "_setActivePaneIdleIfOwner('error');" in apperror_body
-    cancel_body = _extract_block(MESSAGES_JS, "source.addEventListener('cancel'")
-    assert "_setActivePaneIdleIfOwner('cancel');" in cancel_body
+    for marker, fn in [
+        ("source.addEventListener('apperror'", None),
+        ("source.addEventListener('cancel'", None),
+        (None, "_handleStreamError"),
+        (None, "_finalizeStreamEndFallback"),
+    ]:
+        body = (
+            _extract_block(MESSAGES_JS, marker)
+            if marker
+            else extract_function(MESSAGES_JS, fn)
+        )
+        outcome = "cancel" if marker and "cancel" in marker else "error"
+        assert f"_setActivePaneIdleIfOwner('{outcome}');" in body
 
-    # Network 'error' terminals resolve through _handleStreamError; the
-    # stream_end fallback path is likewise not a clean completion.
-    err_body = extract_function(MESSAGES_JS, "_handleStreamError")
-    assert "_setActivePaneIdleIfOwner('error');" in err_body
-    fallback_body = extract_function(MESSAGES_JS, "_finalizeStreamEndFallback")
-    assert "_setActivePaneIdleIfOwner('error');" in fallback_body
-
-    # A settled-session restore observed no terminal event at all — the last
-    # row may be a cancel marker, so it resumes listening without speech.
+    # A settled-session restore observed no terminal event — the last row may
+    # be a cancel marker, so it resumes listening without speech.
     restore_body = extract_function(MESSAGES_JS, "_restoreSettledSession")
     assert "_setActivePaneIdleIfOwner('settled');" in restore_body
 
@@ -172,23 +149,19 @@ def test_thinking_watchdog_declared_and_armed():
     assert "let _thinkingWatchdog=null;" in BOOT_JS
     arm_body = extract_function(BOOT_JS, "_armThinkingWatchdog")
     assert "_thinkingWatchdog=setInterval" in arm_body
-    assert "S.busy||S.activeStreamId" in arm_body
-    # Liveness is judged by the pinned turn's inflight run first — a live
-    # visible session also counts, so a background terminal can't reopen
-    # the mic over a streaming session.
+    # Liveness belongs to the pinned turn's inflight run; the visible
+    # session's own stream counts as busy too.
     assert "INFLIGHT[pin]" in arm_body
+    assert "S.busy||S.activeStreamId" in arm_body
     assert "_startListening();" in arm_body
-    # A restored unsent draft must survive the re-arm: recognition results
+    # A restored unsent draft must survive the re-arm — recognition results
     # write straight into the textarea.
-    assert "ta.value" in arm_body, (
-        "watchdog must not resume recognition over a non-empty restored draft"
-    )
+    assert "ta.value" in arm_body
 
     set_state_body = extract_function(BOOT_JS, "_setState")
     assert "_armThinkingWatchdog();" in set_state_body
     assert "_clearThinkingWatchdog();" in set_state_body
-    # A fresh 'thinking' claim invalidates a previous turn's deferred speak
-    # callback and clears its pending timer.
+    # A fresh 'thinking' claim invalidates a previous turn's deferred speak.
     assert "_voiceModeTurnSeq" in set_state_body
     assert "_voiceModeResponseTimer" in set_state_body
 
@@ -198,15 +171,12 @@ def test_response_complete_hook_defined():
     hook = _extract_window_assign(BOOT_JS, "_voiceModeOnResponseComplete")
     assert "_voiceModeState==='thinking'" in hook
     assert "_speakResponse();" in hook
-    # Terminal outcome gates speech: only an explicit 'done' may read the
-    # last assistant row aloud; cancel/error resume listening silently.
+    # Outcome gates speech; sessionId gates ownership (background terminals
+    # can't release another session's pin); the seq re-check invalidates a
+    # stale deferred speak.
     assert "details.outcome" in hook
-    # Stream-ownership gate: a terminal whose sessionId differs from the
-    # pinned voice-mode owner is ignored entirely.
     assert "details.sessionId" in hook
     assert "_voiceModeThinkingSid" in hook
-    # The deferred speak re-checks that the scheduling turn still owns the
-    # 'thinking' state before reading anything aloud.
     assert "_voiceModeTurnSeq" in hook
     assert "_voiceModeResponseTimer" in hook
 
@@ -233,11 +203,7 @@ pytestmark_node = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 def _run_node(script: str) -> dict:
     result = subprocess.run(
-        [NODE, "-e", script],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
+        [NODE, "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, (
         f"node subprocess failed:\n--- stdout ---\n{result.stdout}\n"
@@ -286,6 +252,16 @@ function showToast() {}
 function autoResize() {}
 function _micOriginNeedsSecureContext() { return false; }
 function _deactivate() {}
+// Dump the standard snapshot after ms; `extra` may be a thunk so late-bound
+// fields (draft, owner) are read at fire time, not when _dump is armed.
+function _dump(extra, ms) {
+  setTimeout(() => {
+    console.log(JSON.stringify(Object.assign(
+      { calls, state: _voiceModeState, sendCalls },
+      typeof extra === 'function' ? extra() : (extra || {}))));
+    process.exit(0);
+  }, ms);
+}
 let _recInstance = null;
 class SpeechRecognition {
   constructor() { _recInstance = this; }
@@ -304,25 +280,63 @@ _startListening = function () { calls.push('listen'); return _innerStartListenin
 """
 
 
+_FUNNEL_FN = extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
+
+
 def _harness(extra_fns: str = "", send_live: bool = True) -> str:
     fns = "\n".join(
-        [
-            extract_function(BOOT_JS, "_voiceSilenceMs"),
-            extract_function(BOOT_JS, "_clearBrowserTtsRecovery"),
-            extract_function(BOOT_JS, "_clearThinkingWatchdog"),
-            extract_function(BOOT_JS, "_armThinkingWatchdog"),
-            extract_function(BOOT_JS, "_setState"),
-            extract_function(BOOT_JS, "_startListening"),
-            extract_function(BOOT_JS, "_armSilenceTimer"),
-            extract_function(BOOT_JS, "_voiceModeSend"),
-            _extract_window_assign(BOOT_JS, "_voiceModeOnResponseComplete"),
-            _extract_window_assign(BOOT_JS, "_voiceModeCancelPendingSend"),
-            extra_fns,
-        ]
+        extract_function(BOOT_JS, name)
+        for name in (
+            "_voiceSilenceMs",
+            "_clearBrowserTtsRecovery",
+            "_clearThinkingWatchdog",
+            "_armThinkingWatchdog",
+            "_setState",
+            "_startListening",
+            "_armSilenceTimer",
+            "_voiceModeSend",
+        )
     )
+    fns += "\n" + _extract_window_assign(BOOT_JS, "_voiceModeOnResponseComplete")
+    fns += "\n" + _extract_window_assign(BOOT_JS, "_voiceModeCancelPendingSend")
+    fns += "\n" + extra_fns
     return _HARNESS.replace("__FNS__", fns).replace(
         "__SEND_LIVE__", "true" if send_live else "false"
     )
+
+
+def _funnel_setup(active: bool, inflight: str, sid="sid-5867", stream="st-1") -> str:
+    """Closure deps for the extracted _setActivePaneIdleIfOwner: activeSid/
+    streamId name the settling stream (attachLiveStream's params), not the
+    UI's active session."""
+    return f"""
+let activeSid = '{sid}';
+let streamId = '{stream}';
+function _isActiveSession() {{ return {str(active).lower()}; }}
+INFLIGHT = {inflight};
+let setBusyCalls = [];
+function setBusy(v) {{ setBusyCalls.push(v); S.busy = v; }}
+function setComposerStatus() {{}}
+function setStatus() {{}}
+"""
+
+
+# Same-session funnel: the visible session's own stream settled.
+_FUNNEL_SAME = _funnel_setup(True, "{ 'sid-5867': { messages: [] } }")
+# A background stream settled while the UI session is not its owner and has
+# no INFLIGHT entry — the broad idle condition still admits the hook call.
+_FUNNEL_BG = _funnel_setup(False, "{}", sid="bg-sid", stream="st-bg")
+# A's stream settled while the visible B is itself in-flight.
+_FUNNEL_BG_LIVE = _funnel_setup(False, "{ 'sid-B': { messages: [] } }", stream="st-A")
+
+# One listening turn: recognizer up, a final transcript captured.
+_UTTERANCE = r"""
+    _startListening();
+    _recInstance.onresult({
+      resultIndex: 0,
+      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
+    });
+"""
 
 
 @pytestmark_node
@@ -331,32 +345,20 @@ def test_onend_defers_to_silence_grace_timer():
     silence timer stays the sole auto-send gate (#5867 problem 2)."""
     script = (
         _harness()
+        + _UTTERANCE
         + r"""
-    _startListening();
-    const rec = _recInstance;
-    rec.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'hello there' }, isFinal: true }],
-    });
-    rec.onend(); // endpointing fires right after the final result
-    setTimeout(() => {
-      calls.push(['early', sendCalls, _voiceModeState]);
-    }, 80);
-    setTimeout(() => {
-      calls.push(['late', sendCalls, _voiceModeState]);
-      console.log(JSON.stringify(calls));
-      process.exit(0);
-    }, 600);
+    _recInstance.onend(); // endpointing fires right after the final result
+    setTimeout(() => { calls.push(['early', sendCalls, _voiceModeState]); }, 80);
+    _dump(null, 600); // 'late' marker folded into the snapshot below
     """
     )
-    calls = _run_node(script)
-    early = next(c for c in calls if c[0] == "early")
-    late = next(c for c in calls if c[0] == "late")
+    out = _run_node(script)
+    early = next(c for c in out["calls"] if isinstance(c, list) and c[0] == "early")
     assert early[1] == 0 and early[2] == "listening", (
-        f"fast onend must not send before the silence grace: {calls}"
+        f"fast onend must not send before the silence grace: {out}"
     )
-    assert late[1] == 1 and late[2] == "thinking", (
-        f"silence timer should own the send after the grace: {calls}"
+    assert out["sendCalls"] == 1 and out["state"] == "thinking", (
+        f"silence timer should own the send after the grace: {out}"
     )
 
 
@@ -367,20 +369,13 @@ def test_terminal_hook_recovers_thinking_to_speaking():
     'thinking' pin into the speak transition (#5867 problem 1)."""
     script = (
         _harness()
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'what time is it' }, isFinal: true }],
-    });
     setTimeout(() => {
       // Simulate the terminal-path funnel call (e.g. apperror tail).
       window._voiceModeOnResponseComplete();
     }, 450);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState, sendCalls }));
-      process.exit(0);
-    }, 1000);
+    _dump(null, 1000);
     """
     )
     out = _run_node(script)
@@ -398,12 +393,8 @@ def test_thinking_watchdog_recovers_when_no_terminal_arrives():
     listening instead of pinning at 'thinking' forever."""
     script = (
         _harness(send_live=True)
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'hello' }, isFinal: true }],
-    });
     // grace fires ~300ms -> _voiceModeSend -> send() consumes the composer
     // and opens the stream, which then dies without ever emitting a
     // terminal event -> watchdog (compressed to 25ms) re-arms listening.
@@ -411,10 +402,7 @@ def test_thinking_watchdog_recovers_when_no_terminal_arrives():
       S.busy = false; S.activeStreamId = null;
       delete INFLIGHT['sid-5867']; // the dead turn left no inflight run
     }, 350);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState, sendCalls }));
-      process.exit(0);
-    }, 800);
+    _dump(null, 800);
     """
     )
     out = _run_node(script)
@@ -433,10 +421,7 @@ def test_onend_without_text_restarts_listening():
         + r"""
     _startListening();
     _recInstance.onend(); // ended with no speech
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState, sendCalls }));
-      process.exit(0);
-    }, 700);
+    _dump(null, 700);
     """
     )
     out = _run_node(script)
@@ -445,138 +430,36 @@ def test_onend_without_text_restarts_listening():
     assert out["state"] == "listening"
 
 
-_FUNNEL_SETUP = r"""
-// _setActivePaneIdleIfOwner's closure deps — route the cancel terminal
-// through the real funnel, not a direct hook call. activeSid/streamId are
-// attachLiveStream's closure params in the real code: they name the stream
-// that settled (the terminal's source), not the UI's active session.
-let activeSid = 'sid-5867';
-let streamId = 'st-1';
-function _isActiveSession() { return true; }
-INFLIGHT = { 'sid-5867': { messages: [] } };
-let setBusyCalls = [];
-function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
-function setComposerStatus() {}
-function setStatus() {}
-"""
-
-_FUNNEL_SETUP_BG_TERMINAL_VISIBLE_STREAM = r"""
-// A's own stream settles while the UI shows a different, itself-streaming
-// session B: _isActiveSession() is false (A != B) and INFLIGHT[B] exists,
-// so the funnel's idle guard skips the voice hook entirely.
-let activeSid = 'sid-5867';
-let streamId = 'st-A';
-function _isActiveSession() { return false; }
-INFLIGHT = { 'sid-B': { messages: [] } };
-let setBusyCalls = [];
-function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
-function setComposerStatus() {}
-function setStatus() {}
-"""
-
-
-_FUNNEL_SETUP_BACKGROUND = r"""
-// A background stream's terminal: the UI session ('sid-5867') is not the
-// stream's owner, and the owner session has no INFLIGHT entry — the broad
-// idle condition still admits the hook call, so ownership must gate inside it.
-let activeSid = 'bg-sid';
-let streamId = 'st-bg';
-function _isActiveSession() { return false; }
-INFLIGHT = {};
-let setBusyCalls = [];
-function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
-function setComposerStatus() {}
-function setStatus() {}
-"""
-
-
+@pytest.mark.parametrize(
+    ("outcome", "expect_speak", "end_state"),
+    [
+        # Stop/cancel and apperror/network-error funnel into the hook: voice
+        # mode must clear 'thinking' and go back to listening without
+        # reading the partial reply or the cancel marker aloud.
+        ("cancel", False, "listening"),
+        ("error", False, "listening"),
+        # 'done' keeps the delayed speak path — regression guard for the
+        # outcome gating itself.
+        ("done", True, "speaking"),
+    ],
+)
 @pytestmark_node
-def test_cancel_terminal_funnel_resumes_listening_without_speech():
-    """Stop/cancel funnels _setActivePaneIdleIfOwner('cancel') into the hook;
-    voice mode must clear 'thinking' and go straight back to listening
-    without reading the partial reply or the cancel marker aloud."""
+def test_terminal_outcome_funnel(outcome, expect_speak, end_state):
     script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP
-        + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
+        _harness(extra_fns=_FUNNEL_FN)
+        + _FUNNEL_SAME
+        + _UTTERANCE
+        + f"""
     // silence grace (~300ms) -> _voiceModeSend -> 'thinking', stream live
-    setTimeout(() => { _setActivePaneIdleIfOwner('cancel'); }, 450);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState }));
-      process.exit(0);
-    }, 1000);
+    setTimeout(() => {{ _setActivePaneIdleIfOwner('{outcome}'); }}, 450);
+    _dump(null, {1400 if expect_speak else 1000});
     """
     )
     out = _run_node(script)
-    assert "speak" not in out["calls"], (
-        f"cancel terminal must not read the partial reply aloud: {out}"
-    )
-    assert "listen" in out["calls"], (
-        f"cancel terminal must resume listening: {out}"
-    )
-    assert out["state"] == "listening"
-
-
-@pytestmark_node
-def test_error_terminal_funnel_resumes_listening_without_speech():
-    """apperror/network-error terminals take the same silent re-arm path."""
-    script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP
-        + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
-    setTimeout(() => { _setActivePaneIdleIfOwner('error'); }, 450);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState }));
-      process.exit(0);
-    }, 1000);
-    """
-    )
-    out = _run_node(script)
-    assert "speak" not in out["calls"]
-    assert "listen" in out["calls"]
-    assert out["state"] == "listening"
-
-
-@pytestmark_node
-def test_done_terminal_still_speaks_through_funnel():
-    """The 'done' outcome keeps the delayed speak path — regression guard for
-    the outcome gating itself (voice mode off is covered by _voiceModeActive
-    checks inside the real hook)."""
-    script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP
-        + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
-    setTimeout(() => { _setActivePaneIdleIfOwner('done'); }, 450);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState }));
-      process.exit(0);
-    }, 1400);
-    """
-    )
-    out = _run_node(script)
-    assert "speak" in out["calls"], f"done terminal must still speak: {out}"
-    assert out["state"] == "speaking"
+    assert ("speak" in out["calls"]) == expect_speak, out
+    assert out["state"] == end_state
+    if not expect_speak:
+        assert "listen" in out["calls"], f"terminal must resume listening: {out}"
 
 
 @pytestmark_node
@@ -585,16 +468,10 @@ def test_stale_done_callback_cannot_speak_over_new_turn():
     claimed 'thinking' — the turn token invalidates the stale callback even
     though state is 'thinking' again when it fires."""
     script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP
+        _harness(extra_fns=_FUNNEL_FN)
+        + _FUNNEL_SAME
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'first' }, isFinal: true }],
-    });
     // Turn 1 sends (~300ms) and its done terminal schedules speak at +400ms.
     setTimeout(() => { _setActivePaneIdleIfOwner('done'); }, 450);
     // 100ms later the user starts a new turn: state returns to 'thinking'
@@ -604,10 +481,7 @@ def test_stale_done_callback_cannot_speak_over_new_turn():
       ta.value = 'next turn';   // the new draft the user is sending
       _voiceModeSend();
     }, 550);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState, sendCalls }));
-      process.exit(0);
-    }, 1400);
+    _dump(null, 1400);
     """
     )
     out = _run_node(script)
@@ -626,16 +500,10 @@ def test_background_terminal_cannot_release_voice_owner():
     but A's terminal must not release B: state, owner token, and draft are
     untouched and recognition does not resume."""
     script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP_BACKGROUND
+        _harness(extra_fns=_FUNNEL_FN)
+        + _FUNNEL_BG
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
     // grace (~300ms) -> _voiceModeSend pins _voiceModeThinkingSid='sid-5867'
     // and enters 'thinking'.
     setTimeout(() => {
@@ -643,13 +511,7 @@ def test_background_terminal_cannot_release_voice_owner():
       S.busy = false;               // B's send is between admission stages
       _setActivePaneIdleIfOwner('error'); // stream A's terminal reaches the funnel
     }, 450);
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        calls, state: _voiceModeState,
-        owner: _voiceModeThinkingSid, draft: ta.value,
-      }));
-      process.exit(0);
-    }, 1000);
+    _dump(() => ({ owner: _voiceModeThinkingSid, draft: ta.value }), 1000);
     """
     )
     out = _run_node(script)
@@ -669,16 +531,10 @@ def test_error_terminal_preserves_restored_draft():
     in the composer holds 'thinking' instead of resuming recognition over
     the draft. Clearing the draft lets the watchdog resume listening."""
     script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP
+        _harness(extra_fns=_FUNNEL_FN)
+        + _FUNNEL_SAME
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
     setTimeout(() => {
       ta.value = 'restored draft';
       S.busy = false; S.activeStreamId = null;
@@ -688,16 +544,15 @@ def test_error_terminal_preserves_restored_draft():
       calls.push(['withDraft', _voiceModeState, ta.value]);
       ta.value = '';                    // user clears the restored draft
     }, 750);
-    setTimeout(() => {
-      calls.push(['afterClear', _voiceModeState]);
-      console.log(JSON.stringify(calls));
-      process.exit(0);
-    }, 1000);
+    setTimeout(() => { calls.push(['afterClear', _voiceModeState]); }, 950);
+    _dump(null, 1000);
     """
     )
-    calls = _run_node(script)
-    with_draft = next(c for c in calls if c[0] == "withDraft")
-    after_clear = next(c for c in calls if c[0] == "afterClear")
+    calls = _run_node(script)["calls"]
+    with_draft = next(c for c in calls if isinstance(c, list) and c[0] == "withDraft")
+    after_clear = next(
+        c for c in calls if isinstance(c, list) and c[0] == "afterClear"
+    )
     assert "speak" not in calls
     assert with_draft[1] == "thinking" and with_draft[2] == "restored draft", (
         f"error terminal must not resume recognition over a restored draft: {calls}"
@@ -714,16 +569,10 @@ def test_switch_to_idle_session_keeps_pinned_turn_thinking():
     The watchdog must judge by the pinned owner — stay 'thinking', start no
     new recognizer — or a spoken aside would be sent as a new turn in B."""
     script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP
+        _harness(extra_fns=_FUNNEL_FN)
+        + _FUNNEL_SAME
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
     // grace (~300ms) -> _voiceModeSend pins 'sid-5867' and enters 'thinking';
     // send() leaves INFLIGHT['sid-5867'] + S.busy for the live stream.
     // The 'thinking' entry's own +300ms _startListening lands ~630ms, so the
@@ -733,17 +582,12 @@ def test_switch_to_idle_session_keeps_pinned_turn_thinking():
       S.busy = false; S.activeStreamId = null; // idle B (sessions.js ~2894)
       calls.push(['switched']);
     }, 700);
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        calls, state: _voiceModeState, owner: _voiceModeThinkingSid,
-      }));
-      process.exit(0);
-    }, 1500);
+    _dump(() => ({ owner: _voiceModeThinkingSid }), 1500);
     """
     )
     out = _run_node(script)
     switch_idx = next(
-        i for i, c in enumerate(out["calls"]) if c[0] == "switched"
+        i for i, c in enumerate(out["calls"]) if isinstance(c, list) and c[0] == "switched"
     )
     post_switch = out["calls"][switch_idx + 1 :]
     assert "listen" not in post_switch and "speak" not in post_switch, (
@@ -760,16 +604,10 @@ def test_background_terminal_during_visible_stream_keeps_thinking():
     watchdog must still see the visible session's live run — 'thinking' holds
     until B goes idle instead of reopening the mic into B's stream."""
     script = (
-        _harness(
-            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
-        )
-        + _FUNNEL_SETUP_BG_TERMINAL_VISIBLE_STREAM
+        _harness(extra_fns=_FUNNEL_FN)
+        + _FUNNEL_BG_LIVE
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
-    });
     // grace (~300ms) -> _voiceModeSend pins 'sid-5867', send() leaves
     // INFLIGHT['sid-5867'] and S.busy for A's live stream.
     setTimeout(() => {
@@ -787,18 +625,16 @@ def test_background_terminal_during_visible_stream_keeps_thinking():
       delete INFLIGHT['sid-B'];
       calls.push(['bIdle']);
     }, 1100);
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        calls, state: _voiceModeState, owner: _voiceModeThinkingSid,
-      }));
-      process.exit(0);
-    }, 1600);
+    _dump(() => ({ owner: _voiceModeThinkingSid }), 1600);
     """
     )
     out = _run_node(script)
-    streaming_idx = next(i for i, c in enumerate(out["calls"]) if c[0] == "bStreaming")
-    idle_idx = next(i for i, c in enumerate(out["calls"]) if c[0] == "bIdle")
-    during = out["calls"][streaming_idx + 1 : idle_idx]
+    marker = lambda name: next(
+        i
+        for i, c in enumerate(out["calls"])
+        if isinstance(c, list) and c[0] == name
+    )
+    during = out["calls"][marker("bStreaming") + 1 : marker("bIdle")]
     assert "listen" not in during and "speak" not in during, (
         f"visible streaming session must keep the pinned turn 'thinking': {out}"
     )
@@ -807,68 +643,37 @@ def test_background_terminal_during_visible_stream_keeps_thinking():
     )
 
 
+@pytest.mark.parametrize(
+    ("mutation", "draft"),
+    [
+        # Mid-grace switch to B (loadSession restores B's draft into the
+        # composer) — the send armed on A must not fire into B.
+        ("S.session = { session_id: 'sid-B' }; ta.value = 'B saved draft';", "B saved draft"),
+        # Same session, composer no longer holds the armed utterance
+        # (cleared or replaced by another path) — bail to listening.
+        ("ta.value = 'edited';", "edited"),
+    ],
+)
 @pytestmark_node
-def test_pending_send_owner_bound_on_session_switch():
-    """A silence timer armed on session A must not fire into session B when
-    the user switches mid-grace — it bails back to listening on B, leaving
-    B's restored draft and composer untouched."""
+def test_pending_send_owner_bound(mutation, draft):
+    """A silence timer armed on session A must not fire its send when the
+    session or the composer contents changed during the grace — it bails
+    back to listening, leaving the composer untouched."""
     script = (
         _harness()
-        + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'hello' }, isFinal: true }],
-    });
+        + _UTTERANCE.replace("'draft'", "'hello'")
+        + f"""
     // silence timer armed for 'sid-5867' + utterance 'hello'; ~300ms grace.
-    setTimeout(() => {
-      S.session = { session_id: 'sid-B' };
-      ta.value = 'B saved draft'; // loadSession restores B's draft
-      calls.push(['switched']);
-    }, 200);
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        calls, state: _voiceModeState, sendCalls, draft: ta.value,
-      }));
-      process.exit(0);
-    }, 900);
+    setTimeout(() => {{ {mutation} calls.push(['mutated']); }}, 200);
+    _dump(() => ({{ draft: ta.value }}), 900);
     """
     )
     out = _run_node(script)
     assert out["sendCalls"] == 0, (
-        f"pending send must not fire into the switched session: {out}"
+        f"pending send must not fire after owner/utterance changed: {out}"
     )
     assert out["state"] == "listening"
-    assert out["draft"] == "B saved draft", (
-        f"B's draft must survive the bailed send: {out}"
-    )
-
-
-@pytestmark_node
-def test_pending_send_bails_when_composer_no_longer_holds_utterance():
-    """Same session, but the composer no longer holds the armed utterance
-    (e.g. cleared or replaced by another path) — bail to listening."""
-    script = (
-        _harness()
-        + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'hello' }, isFinal: true }],
-    });
-    setTimeout(() => { ta.value = 'edited'; }, 200);
-    setTimeout(() => {
-      console.log(JSON.stringify({
-        calls, state: _voiceModeState, sendCalls, draft: ta.value,
-      }));
-      process.exit(0);
-    }, 900);
-    """
-    )
-    out = _run_node(script)
-    assert out["sendCalls"] == 0
-    assert out["state"] == "listening"
-    assert out["draft"] == "edited"
+    assert out["draft"] == draft, f"composer must survive the bailed send: {out}"
 
 
 @pytestmark_node
@@ -877,26 +682,17 @@ def test_loadsession_cancel_drops_pending_send():
     outright so it can never fire after the switch."""
     script = (
         _harness()
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'hello' }, isFinal: true }],
-    });
     setTimeout(() => {
       S.session = { session_id: 'sid-B' };
       window._voiceModeCancelPendingSend(); // loadSession's cross-switch call
     }, 200);
-    setTimeout(() => {
-      console.log(JSON.stringify({ calls, state: _voiceModeState, sendCalls }));
-      process.exit(0);
-    }, 900);
+    _dump(null, 900);
     """
     )
     out = _run_node(script)
-    assert out["sendCalls"] == 0, (
-        f"cancelled timer must never send: {out}"
-    )
+    assert out["sendCalls"] == 0, f"cancelled timer must never send: {out}"
 
 
 @pytestmark_node
@@ -906,12 +702,8 @@ def test_thinking_watchdog_preserves_restored_draft():
     the next onresult would overwrite it — but must resume once cleared."""
     script = (
         _harness(send_live=False)
+        + _UTTERANCE
         + r"""
-    _startListening();
-    _recInstance.onresult({
-      resultIndex: 0,
-      results: [{ 0: { transcript: 'hello' }, isFinal: true }],
-    });
     // grace (~300ms) -> _voiceModeSend -> send() fails pre-stream and
     // restores the draft into the composer.
     // Watchdog polls at 25ms (compressed); after ~450ms it would normally
@@ -920,16 +712,15 @@ def test_thinking_watchdog_preserves_restored_draft():
       calls.push(['withDraft', _voiceModeState]);
       ta.value = '';          // user clears the restored draft
     }, 750);
-    setTimeout(() => {
-      calls.push(['afterClear', _voiceModeState]);
-      console.log(JSON.stringify(calls));
-      process.exit(0);
-    }, 950);
+    setTimeout(() => { calls.push(['afterClear', _voiceModeState]); }, 900);
+    _dump(null, 950);
     """
     )
-    calls = _run_node(script)
-    with_draft = next(c for c in calls if c[0] == "withDraft")
-    after_clear = next(c for c in calls if c[0] == "afterClear")
+    calls = _run_node(script)["calls"]
+    with_draft = next(c for c in calls if isinstance(c, list) and c[0] == "withDraft")
+    after_clear = next(
+        c for c in calls if isinstance(c, list) and c[0] == "afterClear"
+    )
     assert with_draft[1] == "thinking", (
         f"watchdog must not resume recognition over a restored draft: {calls}"
     )
