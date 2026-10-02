@@ -2400,16 +2400,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
-      // #5867: every terminal stream path (done, apperror, cancel, network
-      // error, stream_end fallback, settled-restore) funnels through this
-      // idle transition — release voice mode's 'thinking' pin on all of them,
-      // not just the done handler's autoReadLastAssistant call. The outcome
-      // tells voice mode whether the last assistant row is speakable: only
-      // an explicit 'done' may read it aloud; cancel/error/settled restores
-      // resume listening silently so Stop doesn't read partial work back.
-      // sessionId/streamId name the stream that settled (this closure's
-      // activeSid) so a background terminal can't release the voice-mode
-      // owner pinned to a different session.
+      // #5867: every stream terminal funnels here — release voice mode's
+      // 'thinking' pin with the outcome (only 'done' may speak the last row;
+      // the rest resume silently) and this stream's ids so a background
+      // terminal can't release a different session's owner.
       if(typeof window._voiceModeOnResponseComplete==='function') window._voiceModeOnResponseComplete({outcome:outcome||'settled',sessionId:activeSid,streamId:streamId});
     }
   }

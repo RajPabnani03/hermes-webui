@@ -1585,9 +1585,8 @@ window.renderTranscript=function(container, messages, opts){
   let _browserTtsWatchdog=null;
   let _browserTtsSuppressNextErrorRearm=false;
   let _thinkingWatchdog=null;
-  // Deferred done->speak callback and the turn that scheduled it. A stale
-  // timer must never speak a previous turn's reply over a new stream, so
-  // every fresh 'thinking' claim bumps the seq and cancels the pending call.
+  // Deferred done->speak timer and the turn that scheduled it: every fresh
+  // 'thinking' claim bumps the seq so a stale timer can't speak over a new turn.
   let _voiceModeResponseTimer=null;
   let _voiceModeTurnSeq=0;
   // Configurable via localStorage keys (set from dev console or a future settings panel).
@@ -1642,35 +1641,23 @@ window.renderTranscript=function(container, messages, opts){
     }
   }
 
-  // The 'thinking' pin is released by a stream-terminal event reaching
-  // window._voiceModeOnResponseComplete. If the turn died without any
-  // terminal event (e.g. send() failed before the SSE opened) nothing
-  // re-arms the mic, so poll for a sustained stretch with no live run and
-  // recover to listening instead of pinning at 'thinking' forever.
+  // The 'thinking' pin is released by a stream terminal reaching
+  // window._voiceModeOnResponseComplete. A turn that dies with no terminal
+  // (e.g. send() failed before the SSE opened) leaves nothing to re-arm the
+  // mic, so poll for a sustained idle stretch and recover to listening.
   function _armThinkingWatchdog(){
     _clearThinkingWatchdog();
     let idlePolls=0;
     _thinkingWatchdog=setInterval(()=>{
-      if(!_voiceModeActive||_voiceModeState!=='thinking'){
-        _clearThinkingWatchdog();
-        return;
-      }
-      // Judge the turn by its owner, not the visible session: switching to
-      // an idle chat clears S.busy/S.activeStreamId while the pinned turn's
-      // stream is still running under INFLIGHT — and a visible session that
-      // is itself streaming counts as busy too, so a background terminal
-      // can't reopen the mic over a live run.
+      if(!_voiceModeActive||_voiceModeState!=='thinking'){ _clearThinkingWatchdog(); return; }
+      // Liveness belongs to the pinned turn's inflight run — the visible
+      // session's own stream counts as busy too, so neither an idle-switch
+      // nor a background terminal can reopen the mic over a live run.
       const pin=_voiceModeThinkingSid;
-      const live=(pin&&INFLIGHT[pin])||S.busy||S.activeStreamId;
-      idlePolls=live?0:idlePolls+1;
-      if(idlePolls>=3){
-        if(ta.value&&ta.value.trim()){
-          // send() restored an unsent draft into the composer — resuming
-          // recognition now would overwrite it with the next result. Keep
-          // polling: a retry goes through _voiceModeSend, and clearing the
-          // draft lets the next poll resume listening.
-          return;
-        }
+      idlePolls=(pin&&INFLIGHT[pin])||S.busy||S.activeStreamId?0:idlePolls+1;
+      // A restored draft in the composer must survive — resuming recognition
+      // would overwrite it; keep polling until the user retries or clears it.
+      if(idlePolls>=3&&!(ta.value&&ta.value.trim())){
         _clearThinkingWatchdog();
         _voiceModeThinkingSid=null;
         _startListening();
@@ -1682,7 +1669,7 @@ window.renderTranscript=function(container, messages, opts){
     _voiceModeState=state;
     if(state==='thinking'){
       _voiceModeTurnSeq+=1;
-      if(_voiceModeResponseTimer){clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;}
+      clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;
       _armThinkingWatchdog();
     }
     else _clearThinkingWatchdog();
@@ -1778,16 +1765,13 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _armSilenceTimer(){
-    // Bind the pending send to whoever armed it: a mid-grace chat switch (or
-    // a composer that no longer holds this utterance) must not let
-    // _voiceModeSend read another session's draft as this turn's input.
-    const ownerSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
-    const utterance=ta.value;
+    // Bind the pending send to whoever armed it: a mid-grace chat switch or a
+    // composer that no longer holds this utterance must not send into it.
+    const ownerSid=S.session&&S.session.session_id, utterance=ta.value;
     _silenceTimer=setTimeout(()=>{
       _silenceTimer=null;
       if(!_voiceModeActive||_voiceModeState!=='listening') return;
-      const curSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
-      if(curSid!==ownerSid||ta.value!==utterance){ _startListening(); return; }
+      if((S.session&&S.session.session_id)!==ownerSid||ta.value!==utterance){ _startListening(); return; }
       _voiceModeSend();
     },_voiceSilenceMs());
   }
@@ -2064,35 +2048,25 @@ window.renderTranscript=function(container, messages, opts){
 
   window._voiceModeOnResponseComplete=function(details){
     if(!_voiceModeActive||_voiceModeState!=='thinking') return;
-    // details.outcome comes from the terminal that reached the idle funnel.
-    // A no-arg call (legacy/extension callers) keeps the original speak path.
-    const outcome=(details&&details.outcome)||'done';
-    // The funnel also reports which session's stream settled. Voice mode is
-    // owned by _voiceModeThinkingSid — a terminal from another session's
-    // (background) stream must not release this session's thinking state.
+    // The idle funnel reports {outcome, sessionId, streamId} for the stream
+    // that settled; a no-arg call (legacy/extension callers) speaks as before.
+    // A terminal from another session's stream must not release this
+    // session's pinned owner.
     if(details&&details.sessionId&&details.sessionId!==_voiceModeThinkingSid) return;
-    if(outcome!=='done'){
-      // cancel/error/settled-without-done: the last assistant row is a
-      // partial reply or a terminal marker — clear thinking and go straight
-      // back to listening without reading it aloud. A non-empty composer is
-      // a draft restored by a failed send — hold 'thinking' so the resumed
-      // recognition can't overwrite it (the watchdog resumes once the user
-      // retries or clears it).
+    if(((details&&details.outcome)||'done')!=='done'){
+      // cancel/error/settled: the last row is a partial reply or a marker —
+      // resume listening silently, unless the composer holds a restored draft.
       _voiceModeThinkingSid=null;
-      if(ta.value&&ta.value.trim()) return;
-      _startListening();
+      if(!(ta.value&&ta.value.trim())) _startListening();
       return;
     }
-    // Small delay to let DOM render the final message. Capture the owning
-    // turn: a user may start a new turn inside that window and re-pin state
-    // at 'thinking', so fire only while this turn still owns voice mode.
-    const turnSeq=_voiceModeTurnSeq;
-    if(_voiceModeResponseTimer) clearTimeout(_voiceModeResponseTimer);
+    // Delayed speak owned by this turn: a newer 'thinking' claim bumps the
+    // seq, invalidating any stale timer.
+    const seq=_voiceModeTurnSeq;
+    clearTimeout(_voiceModeResponseTimer);
     _voiceModeResponseTimer=setTimeout(()=>{
       _voiceModeResponseTimer=null;
-      if(_voiceModeActive&&_voiceModeState==='thinking'&&turnSeq===_voiceModeTurnSeq){
-        _speakResponse();
-      }
+      if(_voiceModeActive&&_voiceModeState==='thinking'&&seq===_voiceModeTurnSeq) _speakResponse();
     },400);
   };
 
@@ -2137,7 +2111,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
-    if(_voiceModeResponseTimer){clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;}
+    clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;
     _clearBrowserTtsRecovery();
     _clearThinkingWatchdog();
     try{ if(_recognition) _recognition.abort(); }catch(_){}
