@@ -1655,7 +1655,11 @@ window.renderTranscript=function(container, messages, opts){
         _clearThinkingWatchdog();
         return;
       }
-      const live=(typeof S!=='undefined'&&S)&&(S.busy||S.activeStreamId);
+      // Judge the turn by its owner, not the visible session: switching to
+      // an idle chat clears S.busy/S.activeStreamId while the pinned turn's
+      // stream is still running under INFLIGHT.
+      const pin=_voiceModeThinkingSid, vis=S.session&&S.session.session_id;
+      const live=(pin&&INFLIGHT[pin])||((!pin||pin===vis)&&(S.busy||S.activeStreamId));
       idlePolls=live?0:idlePolls+1;
       if(idlePolls>=3){
         if(ta.value&&ta.value.trim()){

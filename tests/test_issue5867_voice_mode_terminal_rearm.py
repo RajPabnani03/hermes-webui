@@ -241,14 +241,16 @@ let _thinkingWatchdog = null;
 let _voiceModeResponseTimer = null;
 let _voiceModeTurnSeq = 0;
 const S = { session: { session_id: 'sid-5867' }, busy: false, activeStreamId: null };
+let INFLIGHT = {};
 let sendCalls = 0;
 const SEND_LIVE = __SEND_LIVE__;
 function send() {
   sendCalls += 1;
   const text = ta.value;
   ta.value = ''; // send() consumes the composer contents up front
-  if (SEND_LIVE) { S.busy = true; S.activeStreamId = 'st-1'; }
-  else { ta.value = text; } // a pre-stream failure restores the unsent draft
+  const sid = S.session && S.session.session_id;
+  if (SEND_LIVE) { S.busy = true; S.activeStreamId = 'st-1'; INFLIGHT[sid] = { messages: [] }; }
+  else { ta.value = text; delete INFLIGHT[sid]; } // a pre-stream failure restores the unsent draft
 }
 function _speakResponse() { calls.push('speak'); _setState('speaking'); }
 function t(k) { return k; }
@@ -375,7 +377,10 @@ def test_thinking_watchdog_recovers_when_no_terminal_arrives():
     // grace fires ~300ms -> _voiceModeSend -> send() consumes the composer
     // and opens the stream, which then dies without ever emitting a
     // terminal event -> watchdog (compressed to 25ms) re-arms listening.
-    setTimeout(() => { S.busy = false; S.activeStreamId = null; }, 350);
+    setTimeout(() => {
+      S.busy = false; S.activeStreamId = null;
+      delete INFLIGHT['sid-5867']; // the dead turn left no inflight run
+    }, 350);
     setTimeout(() => {
       console.log(JSON.stringify({ calls, state: _voiceModeState, sendCalls }));
       process.exit(0);
@@ -418,7 +423,7 @@ _FUNNEL_SETUP = r"""
 let activeSid = 'sid-5867';
 let streamId = 'st-1';
 function _isActiveSession() { return true; }
-const INFLIGHT = { 'sid-5867': { messages: [] } };
+INFLIGHT = { 'sid-5867': { messages: [] } };
 let setBusyCalls = [];
 function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
 function setComposerStatus() {}
@@ -432,7 +437,7 @@ _FUNNEL_SETUP_BACKGROUND = r"""
 let activeSid = 'bg-sid';
 let streamId = 'st-bg';
 function _isActiveSession() { return false; }
-const INFLIGHT = {};
+INFLIGHT = {};
 let setBusyCalls = [];
 function setBusy(v) { setBusyCalls.push(v); S.busy = v; }
 function setComposerStatus() {}
@@ -655,6 +660,52 @@ def test_error_terminal_preserves_restored_draft():
     assert after_clear[1] == "listening", (
         f"clearing the draft must let the watchdog resume listening: {calls}"
     )
+
+
+@pytestmark_node
+def test_switch_to_idle_session_keeps_pinned_turn_thinking():
+    """Voice turn running in A, user switches to idle chat B: the visible
+    S.busy/S.activeStreamId clear, but INFLIGHT[A] still holds the live run.
+    The watchdog must judge by the pinned owner — stay 'thinking', start no
+    new recognizer — or a spoken aside would be sent as a new turn in B."""
+    script = (
+        _harness(
+            extra_fns=extract_function(MESSAGES_JS, "_setActivePaneIdleIfOwner")
+        )
+        + _FUNNEL_SETUP
+        + r"""
+    _startListening();
+    _recInstance.onresult({
+      resultIndex: 0,
+      results: [{ 0: { transcript: 'draft' }, isFinal: true }],
+    });
+    // grace (~300ms) -> _voiceModeSend pins 'sid-5867' and enters 'thinking';
+    // send() leaves INFLIGHT['sid-5867'] + S.busy for the live stream.
+    // The 'thinking' entry's own +300ms _startListening lands ~630ms, so the
+    // switch marker is placed after it to isolate post-switch listens.
+    setTimeout(() => {
+      S.session = { session_id: 'sid-B' };
+      S.busy = false; S.activeStreamId = null; // idle B (sessions.js ~2894)
+      calls.push(['switched']);
+    }, 700);
+    setTimeout(() => {
+      console.log(JSON.stringify({
+        calls, state: _voiceModeState, owner: _voiceModeThinkingSid,
+      }));
+      process.exit(0);
+    }, 1500);
+    """
+    )
+    out = _run_node(script)
+    switch_idx = next(
+        i for i, c in enumerate(out["calls"]) if c[0] == "switched"
+    )
+    post_switch = out["calls"][switch_idx + 1 :]
+    assert "listen" not in post_switch and "speak" not in post_switch, (
+        f"idle-session switch must not resume recognition on the pinned turn: {out}"
+    )
+    assert out["state"] == "thinking"
+    assert out["owner"] == "sid-5867"
 
 
 @pytestmark_node
