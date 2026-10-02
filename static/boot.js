@@ -1577,6 +1577,8 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
+  // {sid,text} captured when a silence timer arms — consumed by _voiceModeSend.
+  let _voiceSendOwner=null;
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
   // between send and stream completion. (Opus pre-release advisor.)
@@ -1765,21 +1767,20 @@ window.renderTranscript=function(container, messages, opts){
   }
 
   function _armSilenceTimer(){
-    // Bind the pending send to whoever armed it: a mid-grace chat switch or a
-    // composer that no longer holds this utterance must not send into it.
-    const ownerSid=S.session&&S.session.session_id, utterance=ta.value;
-    _silenceTimer=setTimeout(()=>{
-      _silenceTimer=null;
-      if(!_voiceModeActive||_voiceModeState!=='listening') return;
-      if((S.session&&S.session.session_id)!==ownerSid||ta.value!==utterance){ _startListening(); return; }
-      _voiceModeSend();
-    },_voiceSilenceMs());
+    // Bind the pending send to whoever armed it: _voiceModeSend bails if the
+    // session or composer changed before the grace fired.
+    _voiceSendOwner={sid:S.session&&S.session.session_id,text:ta.value};
+    _silenceTimer=setTimeout(()=>{_voiceModeSend();},_voiceSilenceMs());
   }
 
   function _voiceModeSend(){
-    if(!_voiceModeActive) return;
+    const owner=_voiceSendOwner;_voiceSendOwner=null;
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
+    if(!_voiceModeActive) return;
+    if(owner&&((S.session&&S.session.session_id)!==owner.sid||ta.value!==owner.text)){
+      _startListening(); return;
+    }
     const text=(ta.value||'').trim();
     if(!text){
       ta.value='';
@@ -2111,6 +2112,7 @@ window.renderTranscript=function(container, messages, opts){
     bar.style.display='none';
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
+    _voiceSendOwner=null;
     clearTimeout(_voiceModeResponseTimer);_voiceModeResponseTimer=null;
     _clearBrowserTtsRecovery();
     _clearThinkingWatchdog();
@@ -2136,10 +2138,12 @@ window.renderTranscript=function(container, messages, opts){
   // Expose for external use
   window._voiceModeActive=()=>_voiceModeActive;
   window._voiceModeDeactivate=_deactivate;
-  window._voiceModeImmediateSend=_voiceModeSend;
+  // Explicit sends bypass the pending-send owner guard.
+  window._voiceModeImmediateSend=function(){_voiceSendOwner=null;_voiceModeSend();};
   window._voiceModeCancelPendingSend=function(){
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
+    _voiceSendOwner=null;
   };
 })();
 function _currentSessionIsReusableEmptyChat(){

@@ -97,7 +97,7 @@ def test_every_terminal_path_reaches_the_idle_funnel():
     # explicit 'done' outcome — the only speakable terminal.
     done_body = _extract_block(MESSAGES_JS, "source.addEventListener('done'")
     assert "autoReadLastAssistant" in done_body
-    assert "_setActivePaneIdleIfOwner('done');" in done_body
+    assert "_terminalOutcome='done';_setActivePaneIdleIfOwner();" in done_body
 
     for marker, fn in [
         ("source.addEventListener('apperror'", None),
@@ -111,12 +111,12 @@ def test_every_terminal_path_reaches_the_idle_funnel():
             else extract_function(MESSAGES_JS, fn)
         )
         outcome = "cancel" if marker and "cancel" in marker else "error"
-        assert f"_setActivePaneIdleIfOwner('{outcome}');" in body
+        assert f"_terminalOutcome='{outcome}';_setActivePaneIdleIfOwner();" in body
 
     # A settled-session restore observed no terminal event — the last row may
     # be a cancel marker, so it resumes listening without speech.
     restore_body = extract_function(MESSAGES_JS, "_restoreSettledSession")
-    assert "_setActivePaneIdleIfOwner('settled');" in restore_body
+    assert "_terminalOutcome='settled';_setActivePaneIdleIfOwner();" in restore_body
 
 
 def test_onend_keeps_silence_grace_ownership():
@@ -182,13 +182,17 @@ def test_response_complete_hook_defined():
 
 
 def test_silence_timer_binds_send_to_owner():
+    # The pending send captures its owning session + utterance at arm time;
+    # the guard lives in _voiceModeSend (the literal timer-callback shape is
+    # pinned by test_issue4761_voice_mode_config).
     arm_body = extract_function(BOOT_JS, "_armSilenceTimer")
-    # The pending send captures its owning session + utterance and bails to
-    # listening when either changed before the grace elapsed.
-    assert "ownerSid" in arm_body
-    assert "utterance" in arm_body
-    assert "ta.value!==utterance" in arm_body
-    assert "_startListening(); return;" in arm_body
+    assert "_voiceSendOwner=" in arm_body
+    assert "S.session&&S.session.session_id" in arm_body
+    assert "ta.value" in arm_body
+    send_body = extract_function(BOOT_JS, "_voiceModeSend")
+    assert "owner.sid" in send_body
+    assert "owner.text" in send_body
+    assert "_startListening(); return;" in send_body
     # Cross-session loadSession cancels a pending timer outright.
     assert "window._voiceModeCancelPendingSend" in BOOT_JS
     assert "window._voiceModeCancelPendingSend" in SESSIONS_JS
@@ -227,6 +231,7 @@ let _voiceModeActive = true;
 let _voiceModeState = 'idle';
 let _recognition = null;
 let _silenceTimer = null;
+let _voiceSendOwner = null;
 let _voiceModeThinkingSid = null;
 let _browserTtsKeepAlive = null;
 let _browserTtsWatchdog = null;
@@ -312,6 +317,7 @@ def _funnel_setup(active: bool, inflight: str, sid="sid-5867", stream="st-1") ->
     return f"""
 let activeSid = '{sid}';
 let streamId = '{stream}';
+let _terminalOutcome = 'settled';
 function _isActiveSession() {{ return {str(active).lower()}; }}
 INFLIGHT = {inflight};
 let setBusyCalls = [];
@@ -451,7 +457,7 @@ def test_terminal_outcome_funnel(outcome, expect_speak, end_state):
         + _UTTERANCE
         + f"""
     // silence grace (~300ms) -> _voiceModeSend -> 'thinking', stream live
-    setTimeout(() => {{ _setActivePaneIdleIfOwner('{outcome}'); }}, 450);
+    setTimeout(() => {{ _terminalOutcome='{outcome}';_setActivePaneIdleIfOwner(); }}, 450);
     _dump(null, {1400 if expect_speak else 1000});
     """
     )
@@ -473,7 +479,7 @@ def test_stale_done_callback_cannot_speak_over_new_turn():
         + _UTTERANCE
         + r"""
     // Turn 1 sends (~300ms) and its done terminal schedules speak at +400ms.
-    setTimeout(() => { _setActivePaneIdleIfOwner('done'); }, 450);
+    setTimeout(() => { _terminalOutcome='done';_setActivePaneIdleIfOwner(); }, 450);
     // 100ms later the user starts a new turn: state returns to 'thinking'
     // under a fresh turn token before the stale callback's 400ms deadline.
     setTimeout(() => {
@@ -509,7 +515,7 @@ def test_background_terminal_cannot_release_voice_owner():
     setTimeout(() => {
       ta.value = 'restored draft';  // send() failure restored the draft
       S.busy = false;               // B's send is between admission stages
-      _setActivePaneIdleIfOwner('error'); // stream A's terminal reaches the funnel
+      _terminalOutcome='error';_setActivePaneIdleIfOwner(); // stream A's terminal reaches the funnel
     }, 450);
     _dump(() => ({ owner: _voiceModeThinkingSid, draft: ta.value }), 1000);
     """
@@ -538,7 +544,7 @@ def test_error_terminal_preserves_restored_draft():
     setTimeout(() => {
       ta.value = 'restored draft';
       S.busy = false; S.activeStreamId = null;
-      _setActivePaneIdleIfOwner('error'); // B's own terminal
+      _terminalOutcome='error';_setActivePaneIdleIfOwner(); // B's own terminal
     }, 450);
     setTimeout(() => {
       calls.push(['withDraft', _voiceModeState, ta.value]);
@@ -616,7 +622,7 @@ def test_background_terminal_during_visible_stream_keeps_thinking():
       S.session = { session_id: 'sid-B' };
       S.busy = true; S.activeStreamId = 'st-B';
       delete INFLIGHT['sid-5867'];
-      _setActivePaneIdleIfOwner('done'); // funnel guard skips: B is in-flight
+      _terminalOutcome='done';_setActivePaneIdleIfOwner(); // funnel guard skips: B is in-flight
       calls.push(['bStreaming']);
     }, 700);
     setTimeout(() => {
