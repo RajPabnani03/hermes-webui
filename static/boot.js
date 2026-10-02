@@ -1657,9 +1657,11 @@ window.renderTranscript=function(container, messages, opts){
       }
       // Judge the turn by its owner, not the visible session: switching to
       // an idle chat clears S.busy/S.activeStreamId while the pinned turn's
-      // stream is still running under INFLIGHT.
-      const pin=_voiceModeThinkingSid, vis=S.session&&S.session.session_id;
-      const live=(pin&&INFLIGHT[pin])||((!pin||pin===vis)&&(S.busy||S.activeStreamId));
+      // stream is still running under INFLIGHT — and a visible session that
+      // is itself streaming counts as busy too, so a background terminal
+      // can't reopen the mic over a live run.
+      const pin=_voiceModeThinkingSid;
+      const live=(pin&&INFLIGHT[pin])||S.busy||S.activeStreamId;
       idlePolls=live?0:idlePolls+1;
       if(idlePolls>=3){
         if(ta.value&&ta.value.trim()){
@@ -1727,9 +1729,7 @@ window.renderTranscript=function(container, messages, opts){
 
       // Auto-send on silence after final result
       if(_finalText){
-        _silenceTimer=setTimeout(()=>{
-          _voiceModeSend();
-        },_voiceSilenceMs());
+        _armSilenceTimer();
       }
     };
 
@@ -1741,10 +1741,7 @@ window.renderTranscript=function(container, messages, opts){
       // a preceding final result).
       if(_finalText&&_voiceModeActive&&_voiceModeState==='listening'){
         if(!_silenceTimer){
-          _silenceTimer=setTimeout(()=>{
-            _silenceTimer=null;
-            if(_voiceModeActive&&_voiceModeState==='listening') _voiceModeSend();
-          },_voiceSilenceMs());
+          _armSilenceTimer();
         }
       } else if(_voiceModeActive&&_voiceModeState==='listening'){
         // No speech detected — restart listening
@@ -1778,6 +1775,21 @@ window.renderTranscript=function(container, messages, opts){
       // Already started or other error — retry shortly
       setTimeout(()=>{ if(_voiceModeActive) _startListening(); },1000);
     }
+  }
+
+  function _armSilenceTimer(){
+    // Bind the pending send to whoever armed it: a mid-grace chat switch (or
+    // a composer that no longer holds this utterance) must not let
+    // _voiceModeSend read another session's draft as this turn's input.
+    const ownerSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+    const utterance=ta.value;
+    _silenceTimer=setTimeout(()=>{
+      _silenceTimer=null;
+      if(!_voiceModeActive||_voiceModeState!=='listening') return;
+      const curSid=(typeof S!=='undefined'&&S.session)?S.session.session_id:null;
+      if(curSid!==ownerSid||ta.value!==utterance){ _startListening(); return; }
+      _voiceModeSend();
+    },_voiceSilenceMs());
   }
 
   function _voiceModeSend(){
@@ -2151,6 +2163,10 @@ window.renderTranscript=function(container, messages, opts){
   window._voiceModeActive=()=>_voiceModeActive;
   window._voiceModeDeactivate=_deactivate;
   window._voiceModeImmediateSend=_voiceModeSend;
+  window._voiceModeCancelPendingSend=function(){
+    clearTimeout(_silenceTimer);
+    _silenceTimer=null;
+  };
 })();
 function _currentSessionIsReusableEmptyChat(){
   if(!S.session) return false;

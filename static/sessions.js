@@ -2272,6 +2272,10 @@ async function loadSession(sid){
   const _isCurrentLoad = () => _loadingSessionId === sid && _loadSessionGeneration === _loadGeneration;
   _loadingSessionId = sid;
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
+  // A voice-mode silence timer armed on the outgoing session must not fire
+  // into this one — its send is owner-bound, but cancel it up front so the
+  // mic can re-arm on the new session without waiting out the grace.
+  if(currentSid!==sid&&typeof window._voiceModeCancelPendingSend==='function')window._voiceModeCancelPendingSend();
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
