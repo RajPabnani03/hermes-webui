@@ -11,6 +11,7 @@ name: Browser smoke
 #
 # GitHub-hosted CI runs on the canonical upstream repo only; personal forks
 # without Actions billing skip this job cleanly (see tests.yml header).
+# Fork opt-in: RajPabnani03/hermes-webui has Actions enabled, so its jobs run here too.
 
 on:
   pull_request:
@@ -20,7 +21,7 @@ on:
 
 jobs:
   browser-smoke:
-    if: github.repository == 'nesquena/hermes-webui'
+    if: github.repository == 'nesquena/hermes-webui' || github.repository == 'RajPabnani03/hermes-webui'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

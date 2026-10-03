@@ -4,6 +4,7 @@ name: Tests
 # there). Personal forks without Actions billing skip these jobs cleanly instead
 # of failing with "account is locked due to a billing issue". Open cross-fork
 # PRs to nesquena/hermes-webui for full CI signal.
+# Fork opt-in: RajPabnani03/hermes-webui has Actions enabled, so its jobs run here too.
 on:
   pull_request:
     branches: [master]
@@ -16,7 +17,7 @@ jobs:
   # PR adds/modifies vs the merge-base — so it keeps NEW code clean without demanding
   # a reformat of the existing tree's cosmetic backlog (#3273). Fast, fails early.
   lint:
-    if: github.repository == 'nesquena/hermes-webui'
+    if: github.repository == 'nesquena/hermes-webui' || github.repository == 'RajPabnani03/hermes-webui'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +76,7 @@ jobs:
         run: python3 scripts/scope_undef_gate.py
 
   test:
-    if: github.repository == 'nesquena/hermes-webui'
+    if: github.repository == 'nesquena/hermes-webui' || github.repository == 'RajPabnani03/hermes-webui'
     runs-on: ubuntu-latest
     strategy:
       # Don't cancel the other shards/versions when one fails — we want the full
