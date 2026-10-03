@@ -472,13 +472,19 @@ global._sessionListLoadError = null;
 global._sessionListHasLoadedOnce = false;
 global._sessionListFirstRenderAnimated = true;
 global._sessionListSkeletonActive = true;
+global._sessionListRefreshAnimationPending = false;
+global._lastSessionListRenderSig = null;
 global._activeProject = null;
 global.NO_PROJECT_FILTER = '__none__';
 global._showAllProfiles = false;
 global._sessionSourceFilter = 'webui';
+global._renamingSid = null;
+global._sessionActionMenu = null;
 global.S = {{ activeProfile: 'default' }};
 global._reconcileActiveSessionIdleStateFromList = rows => rows;
 global._mergeOptimisticFirstTurnSessions = rows => rows;
+global._sessionListRenderSignature = () => '';
+global._purgeStaleInflightEntries = () => {{}};
 global._syncSessionAttentionSoundState = () => {{}};
 global._pruneLineageReportCacheToVisibleSessions = () => {{}};
 global._markPollingCompletionUnreadTransitions = () => {{}};
@@ -530,7 +536,7 @@ def test_source_filtered_cache_preserves_hidden_bucket_runtime_state():
     remember_source_fn = _extract_function(src, "_rememberSessionListSource")
     remember_streaming_fn = _extract_function(src, "_rememberRenderedStreamingState")
     remember_snapshot_fn = _extract_function(src, "_rememberRenderedSessionSnapshot")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     mark_fn = _extract_function(src, "_markPollingCompletionUnreadTransitions")
     script = f"""
 global._allSessions = [{{
@@ -648,7 +654,7 @@ def test_session_list_response_omits_bucket_counts_when_missing(monkeypatch):
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_scope_mismatch_error_path_respects_sidebar_source():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    purge_fn = _extract_function(src, "_purgeStaleInflightEntries")
+    purge_fn = _extract_function(src, "_hasOwnedOpenLiveStream") + "\n" + _extract_function(src, "_purgeStaleInflightEntries")
     clear_fn = _extract_function(src, "_clearSessionSourceTabCounts")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
     exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")

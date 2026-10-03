@@ -62,10 +62,10 @@ def test_session_update_persists_new_model_without_old_provider(monkeypatch, cat
         "session_id": "7585", "model": "deepseek/deepseek-v4.1-flash",
     })
     monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid: session)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda ws: ws)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda ws, profile=None: ws)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: nullcontext())
     monkeypatch.setattr(routes, "_resolve_context_length_for_session_model", lambda *a: 64000)
-    monkeypatch.setattr(routes, "set_last_workspace", lambda ws: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda ws, profile=None: None)
     monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: payload)
 
     response = routes.handle_post(object(), SimpleNamespace(path="/api/session/update"))

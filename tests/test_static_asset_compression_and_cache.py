@@ -22,6 +22,8 @@ import gzip
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
+import api.config as api_config
+
 
 class _FakeHandler:
     """Minimal request handler stand-in matching tests/test_session_static_assets.py."""
@@ -66,24 +68,6 @@ def _serve(routes, path, query="", request_headers=None):
     return h
 
 
-def _patch_static_root(monkeypatch, static_root):
-    """Force _serve_static to read from a temp directory and clear its cache."""
-    from api import routes
-    monkeypatch.setattr(
-        routes, "_serve_static",
-        lambda handler, parsed, _root=static_root, _orig=routes._serve_static: _orig(handler, parsed),
-    )
-    # Tests redirect by writing files to the real static dir's parent layout
-    # via a fixture; instead we monkeypatch the module-level Path computation.
-    # _serve_static derives static_root from `Path(__file__).parent.parent / "static"`,
-    # so we monkeypatch __file__ via a closure that re-resolves with our temp tree.
-    # Simpler: patch the cache and call the real function with a parsed path that
-    # resolves under the real static dir. We use the fixture below instead.
-
-
-# ── Fixture: build a tiny isolated static tree and rebind paths ───────────
-
-
 import pytest
 
 
@@ -100,30 +84,7 @@ def isolated_static(tmp_path, monkeypatch):
 
     # Patch the cache so cross-test state cannot leak.
     monkeypatch.setattr(routes, "_STATIC_CACHE", {}, raising=True)
-
-    # _serve_static derives static_root from Path(__file__).parent.parent.
-    # Rebind by monkeypatching Path resolution: we wrap the function so the
-    # caller-visible signature is unchanged.
-    original = routes._serve_static
-
-    def wrapped(handler, parsed):
-        # Trick: temporarily monkeypatch Path so the function sees our temp tree.
-        import api.routes as ar
-        orig_file = ar.__file__
-        # Place a sentinel api/routes.py "next to" tmp_path so the relative
-        # walk lands in our static_root.
-        fake_api_dir = tmp_path / "api"
-        fake_api_dir.mkdir(exist_ok=True)
-        fake_routes = fake_api_dir / "routes.py"
-        if not fake_routes.exists():
-            fake_routes.write_text("# stub for path resolution\n")
-        monkeypatch.setattr(ar, "__file__", str(fake_routes))
-        try:
-            return original(handler, parsed)
-        finally:
-            monkeypatch.setattr(ar, "__file__", orig_file)
-
-    monkeypatch.setattr(routes, "_serve_static", wrapped)
+    monkeypatch.setattr(api_config, "get_static_root", lambda: static_root)
     yield static_root
 
 
@@ -251,6 +212,62 @@ def test_image_is_not_gzipped(isolated_static):
     assert h.status == 200
     assert h.header("Content-Encoding") is None
     assert h.header("Content-Type") == "image/png"
+
+
+def test_standard_binary_extension_uses_system_mime_type(isolated_static):
+    """Known binary formats outside the hand-written map keep their real MIME."""
+    from api import routes
+
+    payload = b"%PDF-1.7\n" + b"\x00" * 128
+    _make_static_file(isolated_static, "manual.pdf", payload)
+
+    h = _serve(routes, "/static/manual.pdf")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/pdf"
+    assert bytes(h.body) == payload
+
+
+def test_apk_is_served_as_android_package_when_platform_database_lacks_it(
+    isolated_static, monkeypatch
+):
+    """Android package MIME must not depend on the host's MIME database."""
+    from api import routes
+
+    monkeypatch.setattr(routes.mimetypes, "guess_type", lambda _name: (None, None))
+    payload = b"PK\x03\x04" + b"\x00" * 128
+    _make_static_file(isolated_static, "hermes-webui.apk", payload)
+
+    h = _serve(routes, "/static/hermes-webui.apk")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/vnd.android.package-archive"
+    assert bytes(h.body) == payload
+
+
+def test_unknown_static_extension_falls_back_to_octet_stream(isolated_static):
+    """Unknown files fail closed as downloads instead of being exposed as text."""
+    from api import routes
+
+    payload = b"\x00\xff\x10binary"
+    _make_static_file(isolated_static, "artifact.hermes-unknown", payload)
+
+    h = _serve(routes, "/static/artifact.hermes-unknown")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/octet-stream"
+    assert bytes(h.body) == payload
+
+
+def test_encoded_static_suffix_falls_back_to_octet_stream(isolated_static):
+    """Do not advertise decoded media types without Content-Encoding support."""
+    from api import routes
+
+    payload = b"\x1f\x8b" + b"compressed-svg"
+    _make_static_file(isolated_static, "diagram.svgz", payload)
+
+    h = _serve(routes, "/static/diagram.svgz")
+    assert h.status == 200
+    assert h.header("Content-Type") == "application/octet-stream"
+    assert h.header("Content-Encoding") is None
+    assert bytes(h.body) == payload
 
 
 def test_tiny_file_is_not_gzipped(isolated_static):

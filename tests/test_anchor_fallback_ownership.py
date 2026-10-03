@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -45,13 +46,19 @@ def _run_node_script(script: str) -> str:
     if not node:
         pytest.skip("node executable is required for JavaScript behavior checks")
     try:
-        result = subprocess.run(
-            [node, "-e", script],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+            handle.write(script)
+            script_path = handle.name
+        try:
+            result = subprocess.run(
+                [node, script_path],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
     except subprocess.TimeoutExpired as exc:
         pytest.fail(
             "node behavior check timed out"
@@ -409,6 +416,10 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     legacy_metadata_source = _function_source(
         _ui_js(), "_legacySettledFallbackHasToolMetadata"
     )
+    # #2051: renderMessages() inserts a message block through this helper, so it is
+    # evaluated with it. The shim's createElement() returns no template `content`, so the
+    # helper takes its insertAdjacentHTML fallback here, exactly as before.
+    insert_block_source = _function_source(_ui_js(), "_insertSegmentBlock")
     script = textwrap.dedent(
         f"""
         class FakeClassList {{
@@ -668,12 +679,23 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _scrollAfterMessageRender() {{}}
         function _maybeRecoverVirtualizedBlankViewport() {{ return false; }}
         function _updateMessageVirtualMeasurements() {{}}
+        function _resetMessageVirtualMeasurementBurst() {{}}
         function postProcessRenderedMessages() {{}}
         function _postProcessWithAnchorSuppression() {{}}
         function _formatGatewayModelLabel() {{ return ''; }}
         function _gatewayRoutingFailoverText() {{ return ''; }}
         function _gatewayModelWarningText() {{ return ''; }}
+        function _usedModelTurnChipLabel() {{ return ''; }}
         function _formatTurnDuration() {{ return ''; }}
+        function _loadedCompactionMarkerRawIdxs() {{ return []; }}
+        function _selectCompactionCardPlacements() {{
+          return {{ preWindowMarkers: [], inlineMarkers: [], taskOwner: null }};
+        }}
+        function _insertCompactionCardNodes() {{
+          return {{ insertedNodes: [], taskOwnerNode: null }};
+        }}
+        function _insertPreservedCompressionTaskFallback() {{ return false; }}
+        function _pinCompactionCardAtTop() {{ return false; }}
         function _renderSettledAnchorSceneForMessage(message, segment, rawIdx) {{
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group agent-activity-group';
@@ -685,6 +707,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
 
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
+        eval({json.dumps(insert_block_source)});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
@@ -920,4 +943,5 @@ def test_anchor_settled_renderers_remain_the_primary_scene_path():
 
     assert "if(!message||!message._anchor_activity_scene||!segment) return false;" in transparent
     assert "_anchorSceneRowsForRendering(scene,{settled:true})" in transparent
-    assert "_anchorSceneTransparentNodeForRow(row,{settled:true,finalAnswer})" in transparent
+    assert "const lastNonTerminalWorkRowIndex=_anchorSceneLastNonTerminalWorkRowIndex(rows);" in transparent
+    assert "liveTokenFinalPrefixEligible:idx>lastNonTerminalWorkRowIndex" in transparent

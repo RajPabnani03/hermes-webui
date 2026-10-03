@@ -1,7 +1,25 @@
 import pathlib
+import sys
 from unittest.mock import patch
 
 import bootstrap
+
+
+def test_probe_accepts_agent_that_activates_webui_dependencies_on_import(tmp_path):
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "run_agent.py").write_text(
+        "import builtins\nbuiltins.agent_dependencies_activated = True\nclass AIAgent: pass\n",
+        encoding="utf-8",
+    )
+    (agent_dir / "yaml.py").write_text(
+        "import builtins\n"
+        "if not getattr(builtins, 'agent_dependencies_activated', False):\n"
+        "    raise ImportError('agent dependencies not activated')\n",
+        encoding="utf-8",
+    )
+
+    assert bootstrap._python_can_run_webui_and_agent(sys.executable, agent_dir)
 
 
 def _repo_venv_python(repo_root: pathlib.Path) -> pathlib.Path:
@@ -70,6 +88,24 @@ def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeyp
         assert "cannot import both WebUI dependencies and Hermes Agent" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_packaged_launch_disables_repo_local_venv_creation(monkeypatch, tmp_path):
+    local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_DISABLE_LOCAL_VENV", "1")
+    monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
+
+    with patch.object(bootstrap.venv, "EnvBuilder") as mock_builder:
+        try:
+            bootstrap.ensure_python_has_webui_deps(str(local_python), tmp_path / "agent")
+        except RuntimeError as exc:
+            assert "local .venv creation is disabled" in str(exc)
+            assert "HERMES_WEBUI_PYTHON" in str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+    mock_builder.assert_not_called()
 
 
 def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):

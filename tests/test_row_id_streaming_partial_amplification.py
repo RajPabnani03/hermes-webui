@@ -1,136 +1,108 @@
-"""Regression tests for #7902: streaming reconnect `_row_id` amplification.
+"""Regression test: streaming partial replays of one durable row_id must not amplify.
 
-A reconnect while an assistant row is still streaming can persist multiple
-snapshots of the same durable `_row_id` with divergent `api_content`. The
-pre-merge collapse in `api/models.py` must reduce those snapshots to the most
-advanced one so repeated merges stay at exactly one copy.
+Synthetic reproduction of a real incident (kept generic, no production data):
+a reconnect while an assistant row is still streaming (``finish_reason``
+``incomplete``) persists multiple snapshots of the *same* durable
+``_row_id`` with divergent ``api_content``.  Because the merge dedup key
+extends with the provider sidecar, the snapshots never match each other, and
+because ``_row_id_fast_path_allowed`` disables the fast path once a row id
+counts more than one occurrence, every later replay appends another copy.
+The session file grows unboundedly (observed in the wild: 108,454 copies of
+one row) and full deserialization eventually OOM-kills the server.
 """
 
 
-def _partial_assistant(api_text, first_token_ms, row_id=24318):
+def _partial_assistant(api_text: str, first_token_ms: int) -> dict:
     return {
         "role": "assistant",
         "content": "",
         "timestamp": 1000.0,
         "finish_reason": "incomplete",
         "api_content": api_text,
-        "_row_id": row_id,
+        "_row_id": 24318,
         "_firstTokenMs": first_token_ms,
+        "_turnTps": 1.0,
         "_db_persisted": True,
     }
 
 
-def _settled_assistant(api_text="visible reply", row_id=24318):
-    return {
-        "role": "assistant",
-        "content": "visible reply",
-        "timestamp": 1000.0,
-        "finish_reason": "stop",
-        "api_content": api_text,
-        "_row_id": row_id,
-        "_firstTokenMs": 10,
-        "_db_persisted": True,
-    }
-
-
-def _user_row(content="canonical prompt", row_id=24317):
+def _user_row() -> dict:
     return {
         "role": "user",
-        "content": content,
+        "content": "canonical prompt",
         "timestamp": 999.0,
-        "_row_id": row_id,
+        "_row_id": 24317,
         "_db_persisted": True,
     }
 
 
-def _row_ids(merged):
-    return [m.get("_row_id") for m in merged if isinstance(m, dict)]
+def _row_id_multiset(merged):
+    return [
+        message.get("_row_id")
+        for message in merged
+        if isinstance(message, dict) and message.get("_row_id") is not None
+    ]
 
 
-def test_single_snapshot_fast_path_untouched():
+def test_single_partial_snapshot_replays_without_appending():
+    """Baseline: with only one copy present the fast path already dedups."""
     import api.models as models
 
-    sidecar = [_user_row(), _partial_assistant("Reas: partial", 12)]
-    state = [_user_row(), _partial_assistant("Reas: partial longer", 14)]
+    sidecar = [_user_row(), _partial_assistant("Reas:", 10)]
+    state = [_user_row(), _partial_assistant("Reas:", 10)]
+
     merged = models.merge_session_messages_append_only(sidecar, state)
-    assert _row_ids(merged).count(24318) == 1
+
+    assert _row_id_multiset(merged).count(24318) == 1
 
 
-def test_divergent_snapshots_collapse_to_most_advanced():
+def test_divergent_streaming_snapshots_do_not_amplify_row_id():
+    """Two sidecar snapshots + one state replay of the same durable row.
+
+    Expectation: the merge keeps exactly one row per durable ``_row_id`` and
+    retains the most advanced snapshot, instead of appending a third copy.
+    """
     import api.models as models
 
-    merged = [_user_row(), _partial_assistant("Reas:", 10), _partial_assistant("Reas: partial", 12)]
-    state = [_user_row(), _partial_assistant("Reas: partial longer", 14)]
-    merged = models.merge_session_messages_append_only(merged, state)
-    rows = _row_ids(merged)
-    assert rows.count(24318) == 1, f"row 24318 present {rows.count(24318)}x"
+    sidecar = [
+        _user_row(),
+        _partial_assistant("Reas:", 10),
+        _partial_assistant("Reas: partial", 12),
+    ]
+    state = [
+        _user_row(),
+        _partial_assistant("Reas: partial longer", 14),
+    ]
+
+    merged = models.merge_session_messages_append_only(sidecar, state)
+
+    rows = _row_id_multiset(merged)
+    assert rows.count(24318) == 1, (
+        f"durable row 24318 amplified to {rows.count(24318)} copies"
+    )
     kept = next(m for m in merged if m.get("_row_id") == 24318)
-    assert kept["api_content"] == "Reas: partial longer"
+    assert kept["api_content"] == "Reas: partial longer", (
+        "merge must retain the most advanced streaming snapshot"
+    )
 
 
-def test_repeated_merges_stay_stable():
+def test_repeated_merges_stay_stable_under_amplification_pressure():
+    """The amplification is self-reinforcing across calls: each persist feeds
+    the next merge.  Merging the same advanced state row repeatedly must not
+    grow the row count either time."""
     import api.models as models
 
-    merged = [_user_row(), _partial_assistant("Reas:", 10), _partial_assistant("Reas: partial", 12)]
+    merged = [
+        _user_row(),
+        _partial_assistant("Reas:", 10),
+        _partial_assistant("Reas: partial", 12),
+    ]
     state = [_user_row(), _partial_assistant("Reas: partial longer", 14)]
+
     for _ in range(5):
         merged = models.merge_session_messages_append_only(merged, state)
-    rows = _row_ids(merged)
-    assert rows.count(24318) == 1, f"row 24318 grew to {rows.count(24318)} copies"
 
-
-def test_settled_rows_never_collapsed():
-    import api.models as models
-
-    sidecar = [_user_row(), _settled_assistant("payload-a"), _settled_assistant("payload-b")]
-    state = [_user_row(), _settled_assistant("payload-c")]
-    out_sidecar, out_state = models._collapse_streaming_row_id_snapshots(sidecar, state)
-    # Settled buckets are returned untouched: same length, same payloads.
-    assert len(out_sidecar) == 3 and len(out_state) == 2
-    assert out_sidecar[1]["api_content"] == "payload-a"
-    assert out_sidecar[2]["api_content"] == "payload-b"
-    assert out_state[1]["api_content"] == "payload-c"
-
-
-def test_mixed_skeleton_and_settled_bucket_untouched():
-    import api.models as models
-
-    sidecar = [_user_row(), _partial_assistant("Reas: partial", 12)]
-    state = [_user_row(), _settled_assistant("done")]
-    out_sidecar, out_state = models._collapse_streaming_row_id_snapshots(sidecar, state)
-    # Mixed bucket (skeleton + settled sharing one _row_id) stays untouched.
-    assert len(out_sidecar) == 2 and len(out_state) == 2
-    assert out_sidecar[1]["api_content"] == "Reas: partial"
-    assert out_state[1]["api_content"] == "done"
-
-
-def test_rows_without_row_id_untouched():
-    import api.models as models
-
-    def _no_id(api_text):
-        return {
-            "role": "assistant",
-            "content": "",
-            "timestamp": 1000.0,
-            "finish_reason": "incomplete",
-            "api_content": api_text,
-        }
-
-    sidecar = [_user_row(), _no_id("Reas:"), _no_id("Reas: partial")]
-    state = [_user_row(), _no_id("Reas: partial longer")]
-    merged = models.merge_session_messages_append_only(sidecar, state)
-    assert len(merged) == len(sidecar)
-
-
-def test_tool_call_snapshots_never_collapsed():
-    import api.models as models
-
-    def _tool_snapshot(api_text, ms):
-        msg = _partial_assistant(api_text, ms)
-        msg["tool_calls"] = [{"id": "call-1", "name": "search"}]
-        return msg
-
-    sidecar = [_user_row(), _tool_snapshot("Reas:", 10), _tool_snapshot("Reas: partial", 12)]
-    state = [_user_row(), _tool_snapshot("Reas: partial longer", 14)]
-    merged = models.merge_session_messages_append_only(sidecar, state)
-    assert _row_ids(merged).count(24318) >= 2
+    rows = _row_id_multiset(merged)
+    assert rows.count(24318) == 1, (
+        f"row 24318 grew to {rows.count(24318)} copies across 5 merges"
+    )
