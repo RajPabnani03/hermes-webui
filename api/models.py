@@ -6839,6 +6839,141 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
     return True
 
 
+def _streaming_row_snapshot_api_content(msg: dict):
+    """Return the non-empty provider sidecar string, else None."""
+    if not isinstance(msg, dict):
+        return None
+    value = msg.get("api_content")
+    return value if isinstance(value, str) and value else None
+
+
+def _streaming_row_id_details(msg: dict):
+    """Return (row_id, valid) for durable state.db provenance aliases.
+
+    Mirrors the upstream identity rule: `_row_id`, `_state_db_row_id`,
+    `_db_row_id` and `state_db_row_id` must agree; a conflict or a
+    non-normalizable value is invalid provenance and must not collapse.
+    """
+    if not isinstance(msg, dict):
+        return None, True
+    values = set()
+    for key in ("_row_id", "_state_db_row_id", "_db_row_id", "state_db_row_id"):
+        if key not in msg or msg.get(key) in (None, ""):
+            continue
+        value = msg.get(key)
+        if isinstance(value, bool):
+            return None, False
+        if isinstance(value, int):
+            normalized = str(value) if value >= 0 else None
+        elif isinstance(value, float):
+            normalized = (
+                str(int(value))
+                if math.isfinite(value) and value >= 0 and value.is_integer()
+                else None
+            )
+        elif isinstance(value, str):
+            text = value.strip()
+            normalized = str(int(text)) if text.isdigit() else None
+        else:
+            normalized = None
+        if normalized is None:
+            return None, False
+        values.add(normalized)
+    if len(values) > 1:
+        return None, False
+    return (next(iter(values)) if values else None), True
+
+
+def _streaming_row_snapshot_rank(msg: dict) -> tuple:
+    """Order snapshots of one mid-stream assistant row, stalest to newest."""
+    sidecar = _streaming_row_snapshot_api_content(msg)
+    sidecar_len = len(sidecar) if isinstance(sidecar, str) else 0
+    first_token = msg.get("_firstTokenMs")
+    first_token_val = first_token if isinstance(first_token, (int, float)) else -1
+    return (sidecar_len, first_token_val)
+
+
+def _is_streaming_row_snapshot(msg: dict) -> bool:
+    """True for a mid-stream assistant skeleton carrying only sidecar bytes."""
+    if not isinstance(msg, dict):
+        return False
+    if str(msg.get("role") or "").lower() != "assistant":
+        return False
+    if _normalized_session_message_content(msg) not in ("", None, []):
+        return False
+    if msg.get("tool_calls"):
+        return False
+    if not _streaming_row_snapshot_api_content(msg):
+        return False
+    finish = str(msg.get("finish_reason") or "").strip().lower()
+    return finish in ("", "incomplete", "length", "streaming", "null", "none")
+
+
+def _collapse_streaming_row_id_snapshots(sidecar_messages: list, state_messages: list):
+    """Collapse repeated streaming snapshots sharing one durable `_row_id`.
+
+    A reconnect can persist the same durable row several times while an
+    assistant turn is still streaming. Divergent `api_content` keeps every
+    snapshot on its own dedup key, so the append-only merge would otherwise
+    preserve them all and every later persist could add another copy.
+    Collapse to the most advanced snapshot before the merge runs.
+
+    Each source list keeps exactly one copy at its first snapshot position,
+    carrying the winning payload (a shallow copy when the winner comes from
+    the other list). Mixed buckets — a `_row_id` with any non-skeleton member
+    anywhere — are returned untouched so settled replies are never collapsed.
+    """
+    buckets: dict = {}
+    members: dict = {}
+    for source in (sidecar_messages, state_messages):
+        for msg in source:
+            if not isinstance(msg, dict):
+                continue
+            row_id, valid = _streaming_row_id_details(msg)
+            if not valid or row_id is None:
+                continue
+            members.setdefault(row_id, []).append(msg)
+            if _is_streaming_row_snapshot(msg):
+                buckets.setdefault(row_id, []).append(msg)
+    collapsed_ids = {
+        row_id
+        for row_id, group in buckets.items()
+        if len(group) > 1 and all(_is_streaming_row_snapshot(m) for m in members[row_id])
+    }
+    if not collapsed_ids:
+        return sidecar_messages, state_messages
+    winners = {
+        row_id: max(group, key=_streaming_row_snapshot_rank)
+        for row_id, group in buckets.items()
+        if row_id in collapsed_ids
+    }
+
+    def _filter(source: list) -> list:
+        out = []
+        emitted: set = set()
+        for msg in source:
+            if not isinstance(msg, dict):
+                out.append(msg)
+                continue
+            row_id, valid = _streaming_row_id_details(msg)
+            if (
+                not valid
+                or row_id is None
+                or row_id not in collapsed_ids
+                or not _is_streaming_row_snapshot(msg)
+            ):
+                out.append(msg)
+                continue
+            winner = winners[row_id]
+            if row_id in emitted:
+                continue
+            emitted.add(row_id)
+            out.append(msg if winner is msg else dict(winner))
+        return out
+
+    return _filter(sidecar_messages), _filter(state_messages)
+
+
 def merge_session_messages_append_only(
     sidecar_messages: list,
     state_messages: list,
@@ -6856,6 +6991,9 @@ def merge_session_messages_append_only(
     """
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
+    sidecar_messages, state_messages = _collapse_streaming_row_id_snapshots(
+        sidecar_messages, state_messages
+    )
     watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
     if not state_messages:
         return sidecar_messages
