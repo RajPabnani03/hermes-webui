@@ -27,9 +27,15 @@ Review hardening folded into the fix:
   S.activeStreamId`: the pinned turn's inflight run and the visible
   session's own stream both count, so neither an idle-switch nor a
   background terminal can reopen the mic over a live run.
-- The silence timer binds its pending send to the arming session and
-  utterance; a mid-grace switch or replaced composer bails to listening,
-  and cross-session loadSession cancels the timer outright.
+- The silence timer binds its pending send to the arming session; a
+  mid-grace switch bails to listening (cross-session loadSession cancels
+  the timer outright), while a same-session composer change at the
+  deadline is the user correcting the utterance — the live composer text
+  is sent.
+- After a cross-session loadSession finishes, voice mode retires the
+  outgoing session's recognizer (late callbacks detached) and reopens
+  the mic only when the new chat is idle with an empty composer — a
+  saved draft or a live run stays paused.
 """
 
 from __future__ import annotations
@@ -188,14 +194,41 @@ def test_silence_timer_binds_send_to_owner():
     arm_body = extract_function(BOOT_JS, "_armSilenceTimer")
     assert "_voiceSendOwner=" in arm_body
     assert "S.session&&S.session.session_id" in arm_body
-    assert "ta.value" in arm_body
     send_body = extract_function(BOOT_JS, "_voiceModeSend")
     assert "owner.sid" in send_body
-    assert "owner.text" in send_body
     assert "_startListening(); return;" in send_body
+    # The guard is session-scoped only: a same-session composer change is
+    # the user correcting the utterance — the live text must be sent, not
+    # bailed on (comparing owner.text here dropped the send).
+    assert "owner.text" not in send_body
+    assert "ta.value" in send_body
     # Cross-session loadSession cancels a pending timer outright.
     assert "window._voiceModeCancelPendingSend" in BOOT_JS
     assert "window._voiceModeCancelPendingSend" in SESSIONS_JS
+
+
+def test_session_loaded_hook_defined_and_called():
+    assert "window._voiceModeOnSessionLoaded=function" in BOOT_JS
+    hook = _extract_window_assign(BOOT_JS, "_voiceModeOnSessionLoaded")
+    # Only the 'listening' pin can be stranded; thinking/speaking own
+    # their lifecycle via the watchdog and TTS recovery.
+    assert "_voiceModeState!=='listening'" in hook
+    # The outgoing session's recognizer is retired — its late callbacks
+    # must be detached before abort so they can't write into the new
+    # session's composer.
+    for handler in ("onresult", "onend", "onerror"):
+        assert f"_recognition.{handler}=null" in hook
+    # Reopen the mic only on an idle chat with an empty composer.
+    assert "S.busy" in hook
+    assert "S.activeStreamId" in hook
+    assert "INFLIGHT" in hook
+    assert "ta.value" in hook
+    assert "_startListening();" in hook
+    # The cross-session call site runs after the draft restore, so the
+    # composer already reflects the new session's saved state.
+    idx_draft = SESSIONS_JS.find("_restoreComposerDraft(_draft, sid")
+    idx_hook = SESSIONS_JS.find("window._voiceModeOnSessionLoaded(sid)")
+    assert -1 < idx_draft < idx_hook
 
 
 # --------------------------------------------------------------------------
@@ -242,9 +275,11 @@ let _voiceModeTurnSeq = 0;
 const S = { session: { session_id: 'sid-5867' }, busy: false, activeStreamId: null };
 let INFLIGHT = {};
 let sendCalls = 0;
+let sendTexts = [];
 const SEND_LIVE = __SEND_LIVE__;
 function send() {
   sendCalls += 1;
+  sendTexts.push(ta.value);
   const text = ta.value;
   ta.value = ''; // send() consumes the composer contents up front
   const sid = S.session && S.session.session_id;
@@ -304,6 +339,7 @@ def _harness(extra_fns: str = "", send_live: bool = True) -> str:
     )
     fns += "\n" + _extract_window_assign(BOOT_JS, "_voiceModeOnResponseComplete")
     fns += "\n" + _extract_window_assign(BOOT_JS, "_voiceModeCancelPendingSend")
+    fns += "\n" + _extract_window_assign(BOOT_JS, "_voiceModeOnSessionLoaded")
     fns += "\n" + extra_fns
     return _HARNESS.replace("__FNS__", fns).replace(
         "__SEND_LIVE__", "true" if send_live else "false"
@@ -649,37 +685,144 @@ def test_background_terminal_during_visible_stream_keeps_thinking():
     )
 
 
-@pytest.mark.parametrize(
-    ("mutation", "draft"),
-    [
-        # Mid-grace switch to B (loadSession restores B's draft into the
-        # composer) — the send armed on A must not fire into B.
-        ("S.session = { session_id: 'sid-B' }; ta.value = 'B saved draft';", "B saved draft"),
-        # Same session, composer no longer holds the armed utterance
-        # (cleared or replaced by another path) — bail to listening.
-        ("ta.value = 'edited';", "edited"),
-    ],
-)
 @pytestmark_node
-def test_pending_send_owner_bound(mutation, draft):
-    """A silence timer armed on session A must not fire its send when the
-    session or the composer contents changed during the grace — it bails
-    back to listening, leaving the composer untouched."""
+def test_pending_send_owner_bound_cross_session():
+    """A silence timer armed on session A must not fire its send after a
+    mid-grace switch to B (loadSession restores B's draft into the
+    composer) — it bails back to listening, leaving the composer
+    untouched. A same-session change is different: that is the user
+    correcting the utterance and is covered by
+    test_composer_edit_during_grace_sends_corrected_text."""
     script = (
         _harness()
         + _UTTERANCE.replace("'draft'", "'hello'")
-        + f"""
+        + """
     // silence timer armed for 'sid-5867' + utterance 'hello'; ~300ms grace.
-    setTimeout(() => {{ {mutation} calls.push(['mutated']); }}, 200);
-    _dump(() => ({{ draft: ta.value }}), 900);
+    setTimeout(() => {
+      S.session = { session_id: 'sid-B' };
+      ta.value = 'B saved draft';
+      calls.push(['mutated']);
+    }, 200);
+    _dump(() => ({ draft: ta.value }), 900);
     """
     )
     out = _run_node(script)
     assert out["sendCalls"] == 0, (
-        f"pending send must not fire after owner/utterance changed: {out}"
+        f"pending send must not fire after the owning session changed: {out}"
     )
     assert out["state"] == "listening"
-    assert out["draft"] == draft, f"composer must survive the bailed send: {out}"
+    assert out["draft"] == "B saved draft", (
+        f"composer must survive the bailed send: {out}"
+    )
+
+
+@pytestmark_node
+def test_composer_edit_during_grace_sends_corrected_text():
+    """Editing the recognized utterance during the silence grace is a
+    correction, not a bail: at the deadline the live composer text is
+    sent. A recognition result arriving after the send is a fresh
+    utterance — it must not overwrite the correction back into a
+    not-yet-sent composer."""
+    script = (
+        _harness()
+        + _UTTERANCE.replace("'draft'", "'hello'")
+        + r"""
+    // Timer armed for 'sid-5867' (~300ms grace); the user edits mid-grace.
+    setTimeout(() => { ta.value = 'hello corrected'; }, 200);
+    // The send fires ~300ms; a recognition result afterwards starts a new
+    // utterance rather than clobbering the correction that already sent.
+    setTimeout(() => {
+      calls.push(['afterSend', sendCalls, ta.value]);
+      _recInstance.onresult({
+        resultIndex: 0,
+        results: [{ 0: { transcript: 'next' }, isFinal: true }],
+      });
+    }, 450);
+    _dump(() => ({ sends: sendTexts }), 950);
+    """
+    )
+    out = _run_node(script)
+    after_send = next(
+        c for c in out["calls"] if isinstance(c, list) and c[0] == "afterSend"
+    )
+    assert after_send[1] == 1 and after_send[2] == "", (
+        f"the corrected utterance must send at the grace deadline: {out}"
+    )
+    # The second send's text carries the recognizer's retained _finalText as
+    # a prefix (a fresh recognizer resets it) — the part that matters is the
+    # correction having been sent first, as its own turn.
+    assert out["sends"][0] == "hello corrected" and out["sends"][1].endswith("next"), (
+        f"the edited text is sent first; a later result is its own turn: {out}"
+    )
+    assert out["state"] == "thinking"
+
+
+@pytest.mark.parametrize(
+    ("composer_after_load", "busy", "expect_relisten"),
+    [
+        # Idle chat, empty composer — the ended recognizer is retired and
+        # the mic reopens (the bug left 'listening' with nothing live).
+        ("", False, True),
+        # A restored draft keeps the mic paused — the user's text wins.
+        ("B saved draft", False, False),
+        # A live run on the new session must not be steered into.
+        ("", True, False),
+    ],
+)
+@pytestmark_node
+def test_session_loaded_hook_reopens_mic_only_on_idle_empty_composer(
+    composer_after_load, busy, expect_relisten
+):
+    """After loadSession's cross-switch cancels the pending send and the
+    new session's composer is in place, _voiceModeOnSessionLoaded retires
+    the stale recognizer (late callbacks detached) and reopens the mic
+    only when the chat is idle and its composer is empty."""
+    script = (
+        _harness()
+        + _UTTERANCE
+        + f"""
+    // Silence timer armed on A; endpointing may already have ended the
+    // recognizer. Switch mid-grace to B, in loadSession's order:
+    const oldRec = _recInstance;
+    setTimeout(() => {{
+      window._voiceModeCancelPendingSend();           // sessions.js ~2277
+      S.session = {{ session_id: 'sid-B' }};
+      S.busy = {str(busy).lower()};
+      ta.value = {json.dumps(composer_after_load)};   // B's draft state
+      window._voiceModeOnSessionLoaded('sid-B');      // sessions.js ~2947
+      calls.push([
+        'afterHook',
+        _recInstance === oldRec,
+        !oldRec.onresult && !oldRec.onend && !oldRec.onerror,
+      ]);
+    }}, 200);
+    _dump(() => ({{ draft: ta.value }}), 900);
+    """
+    )
+    out = _run_node(script)
+    after_hook = next(
+        c for c in out["calls"] if isinstance(c, list) and c[0] == "afterHook"
+    )
+    assert "abort" in out["calls"], (
+        f"the outgoing session's recognizer must be retired: {out}"
+    )
+    assert after_hook[2] is True, (
+        f"late callbacks on the stale recognizer must be detached: {out}"
+    )
+    assert out["sendCalls"] == 0, f"no send may fire after the switch: {out}"
+    assert out["draft"] == composer_after_load, (
+        f"the new session's composer must survive the hook: {out}"
+    )
+    listen_count = out["calls"].count("listen")
+    if expect_relisten:
+        assert listen_count == 2 and after_hook[1] is False, (
+            f"idle empty chat must reopen the mic with a fresh recognizer: {out}"
+        )
+        assert out["state"] == "listening"
+    else:
+        assert listen_count == 1 and after_hook[1] is True, (
+            f"draft/live-run chat must stay paused without a new recognizer: {out}"
+        )
 
 
 @pytestmark_node

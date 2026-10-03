@@ -2939,6 +2939,13 @@ async function loadSession(sid){
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:!!opts.preserveActiveInput || (currentSid===sid&&forceReload)});
   }
 
+  // Voice mode: a switch that happened while the mic was 'listening' leaves the
+  // outgoing session's recognizer in charge — Chromium's early onend may have
+  // already ended it, so the indicator can say 'listening' with nothing live.
+  // Now that the composer reflects this session's draft state, let voice mode
+  // retire the stale recognizer and reopen the mic on an idle, empty composer.
+  if(currentSid!==sid&&typeof window._voiceModeOnSessionLoaded==='function')window._voiceModeOnSessionLoaded(sid);
+
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_isCurrentLoad()) _loadingSessionId = null;
 

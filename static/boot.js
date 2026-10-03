@@ -1577,7 +1577,7 @@ window.renderTranscript=function(container, messages, opts){
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
-  // {sid,text} captured when a silence timer arms — consumed by _voiceModeSend.
+  // Owning session captured when a silence timer arms — consumed by _voiceModeSend.
   let _voiceSendOwner=null;
   // Capture the session id at thinking-time so the TTS callback won't read
   // a different session's last assistant reply if the user navigated away
@@ -1768,8 +1768,8 @@ window.renderTranscript=function(container, messages, opts){
 
   function _armSilenceTimer(){
     // Bind the pending send to whoever armed it: _voiceModeSend bails if the
-    // session or composer changed before the grace fired.
-    _voiceSendOwner={sid:S.session&&S.session.session_id,text:ta.value};
+    // session changed before the grace fired.
+    _voiceSendOwner={sid:S.session&&S.session.session_id};
     _silenceTimer=setTimeout(()=>{_voiceModeSend();},_voiceSilenceMs());
   }
 
@@ -1778,7 +1778,11 @@ window.renderTranscript=function(container, messages, opts){
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
     if(!_voiceModeActive) return;
-    if(owner&&((S.session&&S.session.session_id)!==owner.sid||ta.value!==owner.text)){
+    // A mid-grace session switch cancels the armed send outright — bailing to
+    // listening keeps this chat's composer untouched. Within the same session
+    // a changed composer is the user correcting the recognized utterance, so
+    // whatever the composer holds at the deadline is the text to send.
+    if(owner&&(S.session&&S.session.session_id)!==owner.sid){
       _startListening(); return;
     }
     const text=(ta.value||'').trim();
@@ -2144,6 +2148,25 @@ window.renderTranscript=function(container, messages, opts){
     clearTimeout(_silenceTimer);
     _silenceTimer=null;
     _voiceSendOwner=null;
+  };
+  // loadSession calls this once a cross-session switch has finished and the
+  // new session's composer state (restored draft or empty) is in place. A
+  // recognizer bound to the outgoing session is stale — Chromium fires onend
+  // early, so the one still referenced may already be dead while the
+  // indicator reads 'listening'. Detach its handlers so late callbacks can't
+  // write into this composer, then reopen the mic only when the new chat is
+  // idle with an empty composer; a restored draft or a live run stays paused.
+  window._voiceModeOnSessionLoaded=function(sid){
+    if(!_voiceModeActive||_voiceModeState!=='listening') return;
+    const sess=(typeof S!=='undefined')?S.session:null;
+    if(sid&&sess&&sess.session_id!==sid) return;
+    if(_recognition){
+      try{_recognition.onresult=null;_recognition.onend=null;_recognition.onerror=null;_recognition.abort();}catch(_){}
+      _recognition=null;
+    }
+    if(S.busy||S.activeStreamId||(typeof INFLIGHT!=='undefined'&&INFLIGHT[sid])) return;
+    if(ta.value&&ta.value.trim()) return;
+    _startListening();
   };
 })();
 function _currentSessionIsReusableEmptyChat(){
