@@ -9287,6 +9287,14 @@ function _getAppDialogFocusable(){
     .filter(el=>el&&el.style.display!=='none'&&!el.disabled);
 }
 
+function _appDialogFocusTarget(lastFocus){
+  if(!lastFocus||typeof lastFocus.focus!=='function') return null;
+  if(lastFocus.isConnected===false) return null;
+  const overlay=$('appDialogOverlay');
+  if(overlay&&overlay.contains(lastFocus)) return null;
+  return lastFocus;
+}
+
 function _finishAppDialog(result, restoreFocus=true){
   const overlay=$('appDialogOverlay');
   const dialog=$('appDialog');
@@ -9297,11 +9305,18 @@ function _finishAppDialog(result, restoreFocus=true){
   APP_DIALOG.resolve=null;
   APP_DIALOG.kind=null;
   APP_DIALOG.lastFocus=null;
+  // Move focus before hiding. Otherwise the confirm control stays focused
+  // inside an aria-hidden overlay until the restore timer runs, and a
+  // detached opener can receive that restore.
+  const focusTarget=restoreFocus?_appDialogFocusTarget(lastFocus):null;
+  if(focusTarget) focusTarget.focus();
+  else if(document.activeElement&&overlay&&overlay.contains(document.activeElement)){
+    if(typeof document.activeElement.blur==='function') document.activeElement.blur();
+  }
   if(overlay){overlay.style.display='none';overlay.setAttribute('aria-hidden','true');}
   if(dialog) dialog.setAttribute('role','dialog');
   if(input){input.value='';input.style.display='none';input.placeholder='';}
   if(confirmBtn){confirmBtn.classList.remove('danger');confirmBtn.textContent=t('dialog_confirm_btn');}
-  if(restoreFocus&&lastFocus&&typeof lastFocus.focus==='function'){setTimeout(()=>lastFocus.focus(),0);}
   if(resolve) resolve(result);
 }
 
@@ -18045,7 +18060,7 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${undoBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
