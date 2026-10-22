@@ -2692,6 +2692,7 @@ window.renderTranscript=function(container, messages, opts){
     if(!_voiceModeActive||_voiceModeState!=='listening') return;
     const sess=(typeof S!=='undefined')?S.session:null;
     if(sid&&sess&&sess.session_id!==sid) return;
+    clearTimeout(_silenceTimer);_silenceTimer=null;_voiceSendOwner=null;
     if(_recognition){
       try{_recognition.onresult=null;_recognition.onend=null;_recognition.onerror=null;_recognition.abort();}catch(_){}
       _recognition=null;

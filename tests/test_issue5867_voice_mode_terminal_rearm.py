@@ -551,6 +551,7 @@ def test_background_terminal_cannot_release_voice_owner():
     setTimeout(() => {
       ta.value = 'restored draft';  // send() failure restored the draft
       S.busy = false;               // B's send is between admission stages
+      delete INFLIGHT['sid-5867'];  // reach the hook's session-id gate
       _terminalOutcome='error';_setActivePaneIdleIfOwner(); // stream A's terminal reaches the funnel
     }, 450);
     _dump(() => ({ owner: _voiceModeThinkingSid, draft: ta.value }), 1000);
@@ -823,6 +824,43 @@ def test_session_loaded_hook_reopens_mic_only_on_idle_empty_composer(
         assert listen_count == 1 and after_hook[1] is True, (
             f"draft/live-run chat must stay paused without a new recognizer: {out}"
         )
+
+
+@pytestmark_node
+@pytest.mark.parametrize(
+    ("composer_after_load", "busy", "expect_relisten"),
+    [("", False, True), ("B saved draft", False, False), ("", True, False)],
+)
+def test_late_onend_after_switch_cannot_rearm_into_new_session(
+    composer_after_load, busy, expect_relisten
+):
+    """loadSession cancels A's pending send, then Chromium's late onend
+    re-arms the silence timer for A before B's composer is in place. The
+    session-loaded hook must drop that timer, so its owner-mismatch branch
+    can't reopen the mic over B's draft, into B's live run, or twice."""
+    script = (
+        _harness()
+        + _UTTERANCE
+        + f"""
+    const oldRec = _recInstance;
+    setTimeout(() => {{
+      window._voiceModeCancelPendingSend();           // sessions.js cross-switch
+      oldRec.onend();                                 // late onend re-arms for A
+      S.session = {{ session_id: 'sid-B' }};
+      S.busy = {str(busy).lower()};
+      ta.value = {json.dumps(composer_after_load)};
+      window._voiceModeOnSessionLoaded('sid-B');
+    }}, 100);
+    _dump(() => ({{ draft: ta.value, timer: _silenceTimer, owner: _voiceSendOwner }}), 900);
+    """
+    )
+    out = _run_node(script)
+    assert out["sendCalls"] == 0, f"no send may fire after the switch: {out}"
+    assert out["draft"] == composer_after_load, f"B's composer must survive: {out}"
+    assert out["timer"] is None and out["owner"] is None, out
+    assert out["calls"].count("listen") == (2 if expect_relisten else 1), (
+        f"exactly one recognizer may be live after the switch: {out}"
+    )
 
 
 @pytestmark_node
