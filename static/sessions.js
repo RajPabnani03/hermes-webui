@@ -2776,7 +2776,7 @@ async function loadSession(sid){
   if(currentSid!==sid&&typeof _uploadPendingFilesSyncProgressForSession==='function')_uploadPendingFilesSyncProgressForSession(sid);
   // A voice-mode silence timer armed on the outgoing session must not fire
   // into this one — drop it up front so the mic can re-arm without the grace wait.
-  if(currentSid!==sid&&typeof window._voiceModeCancelPendingSend==='function')window._voiceModeCancelPendingSend();
+  if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._voiceModeCancelPendingSend==='function')window._voiceModeCancelPendingSend();
   // Reset scroll state for fresh session navigation — the reader expects to
   // land at the bottom of the new transcript, not wherever a stale unpin flag
   // from a prior session or a stray touch event during loading would place them.
@@ -3531,7 +3531,7 @@ async function loadSession(sid){
   // already ended it, so the indicator can say 'listening' with nothing live.
   // Now that the composer reflects this session's draft state, let voice mode
   // retire the stale recognizer and reopen the mic on an idle, empty composer.
-  if(currentSid!==sid&&typeof window._voiceModeOnSessionLoaded==='function')window._voiceModeOnSessionLoaded(sid);
+  if(currentSid!==sid&&typeof window!=='undefined'&&typeof window._voiceModeOnSessionLoaded==='function')window._voiceModeOnSessionLoaded(sid);
 
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_isCurrentLoad()) _loadingSessionId = null;
