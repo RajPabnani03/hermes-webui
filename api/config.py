@@ -11,6 +11,7 @@ Discovery order for all paths:
 
 import collections
 import copy
+import functools
 import hashlib
 import json
 import logging
@@ -9180,7 +9181,10 @@ class _DeferredCatalogPublication:
         # what removes the cycle; holding it would recreate the deadlock.
         self._lock.release()
         while self._commits:
-            _commit_models_cache_to_disk_after_lock(*self._commits.pop(0))
+            # Queued callables (endpoint-error retry scheduling, #8158) resolve
+            # config, so they too must run only once the catalog lock is free.
+            item = self._commits.pop(0)
+            item() if callable(item) else _commit_models_cache_to_disk_after_lock(*item)
         return False
 
 
@@ -9237,15 +9241,17 @@ def _models_endpoint_error_profile() -> str:
 
 
 def _custom_provider_entry_snapshot(provider_id: str) -> dict | None:
-    """Deep copy of the calling profile's entry for ``provider_id``.
+    """The calling profile's entry for ``provider_id``, from a request-owned config.
 
-    Must run on the scheduling request thread: ``get_config()`` resolves that
-    thread's profile config, and the copy outlives any later global reload.
+    Must run on the scheduling request thread with no catalog lock held:
+    ``get_config_snapshot()`` copies that thread's profile config atomically
+    under ``_cfg_lock``, so another profile's in-place reload of the shared
+    cache cannot swap the entry between the read and the copy.
     """
     slug = str(provider_id or "").strip().lower()
-    for candidate in _custom_provider_entries(get_config()):
+    for candidate in _custom_provider_entries(get_config_snapshot()):
         if _custom_provider_slug_from_name(candidate.get("name")) == slug:
-            return copy.deepcopy(candidate)
+            return candidate
     return None
 
 
@@ -11760,7 +11766,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     )
                 )
             ):
-                _maybe_schedule_models_endpoint_error_retries(cached)
+                deferred_disk_commits.append(
+                    functools.partial(_maybe_schedule_models_endpoint_error_retries, cached)
+                )
                 return cached
             if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
                 if stale_disk_groups is not None:
@@ -11783,13 +11791,17 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         cached = _get_fresh_memory_models_cache(now)
         if cached is not None:
             if not force_refresh:
-                _maybe_schedule_models_endpoint_error_retries(cached)
+                deferred_disk_commits.append(
+                    functools.partial(_maybe_schedule_models_endpoint_error_retries, cached)
+                )
                 return cached
             if (
                 force_refresh_started_at is not None
                 and _available_models_live_rebuild_ts >= force_refresh_started_at
             ):
-                _maybe_schedule_models_endpoint_error_retries(cached)
+                deferred_disk_commits.append(
+                    functools.partial(_maybe_schedule_models_endpoint_error_retries, cached)
+                )
                 return cached
 
         # A concurrent forced refresh may have started after this caller sampled
@@ -11816,7 +11828,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     cached is not None
                     and _available_models_live_rebuild_ts >= force_refresh_started_at
                 ):
-                    _maybe_schedule_models_endpoint_error_retries(cached)
+                    deferred_disk_commits.append(
+                        functools.partial(_maybe_schedule_models_endpoint_error_retries, cached)
+                    )
                     return cached
             if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
                 if stale_disk_groups is not None:
@@ -11829,8 +11843,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             _sync_models_cache_provenance()
-            _maybe_schedule_models_endpoint_error_retries(disk_groups)
-            return copy.deepcopy(disk_groups)
+            served = copy.deepcopy(disk_groups)
+            deferred_disk_commits.append(
+                functools.partial(_maybe_schedule_models_endpoint_error_retries, served)
+            )
+            return served
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────
         # Server-initiated wakeup turns (Option Z) reach here with a cold
@@ -12408,11 +12425,12 @@ def get_available_models_for_session_visit() -> dict:
         now_mono = time.monotonic()
         with _available_models_cache_lock:
             cached = _get_fresh_memory_models_cache(now_mono)
-            if cached is not None:
-                _mark("memory_cache_hit")
-                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                _maybe_schedule_models_endpoint_error_retries(cached)
-                return cached
+        # Retry scheduling resolves config, so it runs outside the catalog lock.
+        if cached is not None:
+            _mark("memory_cache_hit")
+            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+            _maybe_schedule_models_endpoint_error_retries(cached)
+            return cached
         _mark("memory_cache_miss_loading_disk")
         disk_epoch = _models_rebuild_seq
         disk_cached = _load_models_cache_from_disk()
@@ -12421,16 +12439,16 @@ def get_available_models_for_session_visit() -> dict:
                 if disk_epoch != _models_rebuild_seq:
                     disk_cached = None
                 cached = _get_fresh_memory_models_cache(time.monotonic())
-                if cached is not None:
-                    _mark("disk_then_memory_cache_hit")
-                    _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-                    _maybe_schedule_models_endpoint_error_retries(cached)
-                    return cached
-                if disk_cached is not None:
+                if cached is None and disk_cached is not None:
                     _available_models_cache = copy.deepcopy(disk_cached)
                     _available_models_cache_ts = time.monotonic()
                     _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
                     _sync_models_cache_provenance()
+            if cached is not None:
+                _mark("disk_then_memory_cache_hit")
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                _maybe_schedule_models_endpoint_error_retries(cached)
+                return cached
             if disk_cached is not None:
                 _mark("disk_cache_returned")
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")

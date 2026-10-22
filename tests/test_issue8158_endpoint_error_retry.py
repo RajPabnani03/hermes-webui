@@ -438,6 +438,7 @@ def _run_live_models(monkeypatch, *, fail, during_request=None):
         ],
     }
     monkeypatch.setattr(config, "get_config", lambda: config_data)
+    monkeypatch.setattr(config, "cfg", config_data)
     _install_provider_model_ids(monkeypatch, lambda provider: [])
 
     def fake_urlopen(req, timeout=None):
@@ -591,3 +592,93 @@ def test_old_live_response_does_not_patch_a_successor_catalog(monkeypatch, chang
         group = _cached_group("custom:test-gateway")
     assert "models_endpoint_error" in group
     assert not any("chat-a" in m["id"] for m in group["models"])
+
+
+def test_retry_entry_is_copied_atomically_from_the_shared_config_cache(monkeypatch, tmp_path):
+    """A reads the shared cache, B's real loader reloads it in place, then A copies."""
+    import api.profiles as profiles
+
+    b_config = tmp_path / "profile-b.yaml"
+    b_config.write_text(
+        "custom_providers:\n"
+        "  - name: Broken Proxy\n"
+        "    base_url: https://owner-b.example/v1\n"
+        "    api_key: owner-b-key\n"
+    )
+    requests = []
+
+    def fake_urlopen(req, timeout=None):
+        requests.append((req.full_url, req.get_header("Authorization")))
+        return _payload_response(["a-model"])
+
+    real_entries = config._custom_provider_entries
+
+    def entries_after_foreign_reload(config_data):
+        def reload_b():
+            with config._cfg_lock:
+                config._refresh_config_cache(b_config)
+
+        loader = threading.Thread(target=reload_b)
+        loader.start()
+        loader.join(timeout=0.5)
+        return real_entries(config_data)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", lambda *a, **k: _NullScope(), raising=False)
+    saved_cache = copy.deepcopy(config._cfg_cache)
+    saved_fingerprint = config._cfg_fingerprint
+    try:
+        with _CatalogState():
+            seeded = _seed_errored_catalog()
+            a_cfg = config.cfg
+            config._cfg_cache.clear()
+            config._cfg_cache.update(a_cfg)
+            config.cfg = config._cfg_cache
+            config._available_models_cache_source_fingerprint = (
+                config._models_cache_source_fingerprint()
+            )
+            monkeypatch.setattr(config, "_custom_provider_entries", entries_after_foreign_reload)
+            monkeypatch.setattr(config, "_models_build_identity_current", lambda fp, profile: True)
+            config._maybe_schedule_models_endpoint_error_retries(seeded, profile="default")
+            assert _wait_until(_retry_inflight_empty)
+    finally:
+        with config._cfg_lock:
+            config._cfg_cache.clear()
+            config._cfg_cache.update(saved_cache)
+            config._cfg_fingerprint = saved_fingerprint
+    assert requests == [("https://broken.example/v1/models", "Bearer bad-key")]
+
+
+class _NullScope:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _serve_session_visit(monkeypatch):
+    monkeypatch.setattr(config, "_models_cache_file_age_seconds", lambda *a: 0.0)
+    return config.get_available_models_for_session_visit()
+
+
+@pytest.mark.parametrize(
+    "serve",
+    [lambda _mp: config.get_available_models(), _serve_session_visit],
+    ids=["public-warm", "session-visit"],
+)
+def test_retry_scheduling_resolves_config_outside_the_catalog_lock(monkeypatch, serve):
+    owned = []
+    real_entries = config._custom_provider_entries
+
+    def recording_entries(config_data):
+        owned.append(config._available_models_cache_lock._is_owned())
+        return real_entries(config_data)
+
+    monkeypatch.setattr(config, "_custom_provider_entries", recording_entries)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _payload_response([]))
+    with _CatalogState():
+        _seed_errored_catalog()
+        serve(monkeypatch)
+        assert _wait_until(_retry_inflight_empty)
+    assert owned and not any(owned)

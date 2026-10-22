@@ -151,9 +151,15 @@ never duplicated by concurrent readers. The same window applies after a live
 rebuild publishes (`_available_models_live_rebuild_ts`): those errors were just
 observed, so only an older (e.g. disk-loaded) diagnostic is re-probed at once.
 
-The scheduler deep-copies the provider entry from the scheduling request's
-`get_config()` (outside the catalog lock) and confirms that profile's identity
-is still current. The worker probes from that owned snapshot only, never from
+The scheduler takes the provider entry from a request-owned whole-config copy
+(`get_config_snapshot()`, copied atomically under `_cfg_lock`, so another
+profile's in-place reload of the shared cache cannot swap it before the copy)
+and confirms that profile's identity is still current. Scheduling runs with no
+catalog lock held: the warm, follower and disk-hit paths of
+`get_available_models` queue it on the `_DeferredCatalogPublication` scope,
+which runs it after releasing the catalog lock, and the session-visit path calls
+it after leaving its own lock scopes; only the fenced admission briefly
+reacquires the catalog lock. The worker probes from that owned snapshot only, never from
 the process-global `cfg`, which a later profile load may replace. It resolves
 the credential exactly as the rebuild
 probe does (literal `api_key`, `key_env`, then the credential-pool fallback),
