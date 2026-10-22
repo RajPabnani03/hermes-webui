@@ -9236,20 +9236,30 @@ def _models_endpoint_error_profile() -> str:
         return "default"
 
 
-def _probe_errored_custom_provider_models(provider_id: str) -> list[dict] | None:
-    """Probe one errored named custom provider's ``/v1/models`` endpoint.
+def _custom_provider_entry_snapshot(provider_id: str) -> dict | None:
+    """Deep copy of the calling profile's entry for ``provider_id``.
 
-    Returns the advertised ``{id, label}`` rows on success (possibly empty)
-    and ``None`` on any failure, so a still-down endpoint keeps its retained
-    diagnostic.
+    Must run on the scheduling request thread: ``get_config()`` resolves that
+    thread's profile config, and the copy outlives any later global reload.
     """
     slug = str(provider_id or "").strip().lower()
-    entry = None
-    for candidate in _custom_provider_entries():
+    for candidate in _custom_provider_entries(get_config()):
         if _custom_provider_slug_from_name(candidate.get("name")) == slug:
-            entry = candidate
-            break
-    if entry is None:
+            return copy.deepcopy(candidate)
+    return None
+
+
+def _probe_errored_custom_provider_models(provider_id: str, entry: dict | None) -> list[dict] | None:
+    """Probe one errored named custom provider's ``/v1/models`` endpoint.
+
+    ``entry`` is the scheduling profile's snapshot; endpoint, credential and
+    allowlist all come from it, never from the process-global ``cfg``.
+    Returns the advertised ``{id, label}`` rows on success (possibly empty),
+    filtered like ``/api/models/live``, and ``None`` on any failure, so a
+    still-down endpoint keeps its retained diagnostic.
+    """
+    slug = str(provider_id or "").strip().lower()
+    if not isinstance(entry, dict):
         return None
     base = str(entry.get("base_url") or "").strip().rstrip("/")
     api_key = str(entry.get("api_key") or "").strip()
@@ -9316,6 +9326,17 @@ def _probe_errored_custom_provider_models(provider_id: str) -> list[dict] | None
             continue
         seen.add(model_id)
         models.append({"id": model_id, "label": label or model_id})
+    try:
+        from api.routes import _custom_provider_allowlist_ids
+
+        allowlist = _custom_provider_allowlist_ids(entry)
+    except Exception:
+        return None  # fail closed: cannot prove the owner's allowlist policy
+    if allowlist and models:
+        allowed = set(allowlist)
+        models = [m for m in models if m["id"] in allowed]
+        present = {m["id"] for m in models}
+        models.extend({"id": a, "label": a} for a in allowlist if a not in present)
     return models
 
 
@@ -9377,7 +9398,7 @@ def _clear_models_endpoint_error_locked(provider_id: str, models) -> bool:
     return True
 
 
-def _run_models_endpoint_error_retry(key, provider_id, generation, fingerprint, profile):
+def _run_models_endpoint_error_retry(key, provider_id, generation, fingerprint, profile, entry):
     """Worker for one coalesced re-probe; publishes only if still current."""
     from contextlib import nullcontext as _nullcontext
 
@@ -9394,7 +9415,7 @@ def _run_models_endpoint_error_retry(key, provider_id, generation, fingerprint, 
     identity_current = False
     try:
         with scope:
-            models = _probe_errored_custom_provider_models(provider_id)
+            models = _probe_errored_custom_provider_models(provider_id, entry)
             if models is not None:
                 identity_current = _models_build_identity_current(
                     fingerprint, profile
@@ -9445,13 +9466,30 @@ def _maybe_schedule_models_endpoint_error_retries(catalog, *, profile=None) -> N
     ) or "default"
     now = time.monotonic()
     with _available_models_cache_lock:
+        # A live rebuild that just recorded these errors already probed them.
+        if now - _available_models_live_rebuild_ts < _MODELS_ENDPOINT_ERROR_RETRY_TTL:
+            return
         generation = _models_rebuild_seq
         fingerprint = copy.deepcopy(_available_models_cache_source_fingerprint)
-        for provider_id in provider_ids:
+        due = [
+            pid for pid in provider_ids
+            if (resolved_profile, pid) not in _models_endpoint_error_retry_inflight
+            and _models_endpoint_error_retry_next.get((resolved_profile, pid), 0.0) <= now
+        ]
+    if not due or fingerprint is None:
+        return
+    # Snapshot the provider entries outside the catalog lock, then prove the
+    # process config still belongs to this catalog's profile/sources: the
+    # worker must never read the global cfg after another profile loads.
+    entries = {pid: _custom_provider_entry_snapshot(pid) for pid in due}
+    if not _models_build_identity_current(fingerprint, resolved_profile):
+        return
+    with _available_models_cache_lock:
+        if generation != _models_rebuild_seq:
+            return
+        for provider_id in due:
             key = (resolved_profile, provider_id)
-            if key in _models_endpoint_error_retry_inflight:
-                continue
-            if _models_endpoint_error_retry_next.get(key, 0.0) > now:
+            if key in _models_endpoint_error_retry_inflight or entries[provider_id] is None:
                 continue
             _models_endpoint_error_retry_inflight.add(key)
             _models_endpoint_error_retry_next[key] = (
@@ -9460,7 +9498,8 @@ def _maybe_schedule_models_endpoint_error_retries(catalog, *, profile=None) -> N
             try:
                 threading.Thread(
                     target=_run_models_endpoint_error_retry,
-                    args=(key, provider_id, generation, fingerprint, resolved_profile),
+                    args=(key, provider_id, generation, fingerprint, resolved_profile,
+                          entries[provider_id]),
                     name="models-endpoint-error-retry",
                     daemon=True,
                 ).start()
@@ -9468,23 +9507,40 @@ def _maybe_schedule_models_endpoint_error_retries(catalog, *, profile=None) -> N
                 _models_endpoint_error_retry_inflight.discard(key)
 
 
-def _clear_cached_models_endpoint_error(provider_id: str, models) -> bool:
-    """Clear a retained endpoint error after a successful same-owner live probe.
+def _models_endpoint_error_claim(provider_id: str):
+    """Capture catalog ownership for a live probe BEFORE its network I/O.
 
-    Used by ``/api/models/live``: the probe already succeeded for this
-    profile/provider, so only the generation/source fences remain — a
-    catalog that was invalidated or re-sourced since cannot be patched.
+    Returns ``(profile, slug, generation, fingerprint, entry)`` or ``None``
+    when the published catalog has no current identity to claim.
     """
     slug = str(provider_id or "").strip().lower()
     if not slug:
-        return False
+        return None
     profile = _models_endpoint_error_profile()
     with _cache_build_cv:
         generation = _models_rebuild_seq
         fingerprint = copy.deepcopy(_available_models_cache_source_fingerprint)
-    if fingerprint is None:
+    if fingerprint is None or not _models_build_identity_current(fingerprint, profile):
+        return None
+    return (profile, slug, generation, fingerprint, _custom_provider_entry_snapshot(slug))
+
+
+def _clear_cached_models_endpoint_error(claim, models) -> bool:
+    """Clear a retained endpoint error after a successful live probe.
+
+    Used by ``/api/models/live`` with the claim taken before its request:
+    the result is dropped if the profile, catalog generation, source
+    fingerprint or provider entry (endpoint/credential/allowlist) changed
+    while the request was in flight — ownership is never recaptured after I/O.
+    """
+    if claim is None:
         return False
-    if not _models_build_identity_current(fingerprint, profile):
+    profile, slug, generation, fingerprint, entry = claim
+    if (
+        _models_endpoint_error_profile() != profile
+        or not _models_build_identity_current(fingerprint, profile)
+        or _custom_provider_entry_snapshot(slug) != entry
+    ):
         return False
     with _cache_build_cv:
         if generation != _models_rebuild_seq:

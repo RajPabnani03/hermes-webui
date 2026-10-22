@@ -25279,7 +25279,15 @@ def _handle_live_models(handler, parsed):
                     except ImportError:
                         pass
                 _custom_live_probe_succeeded = False
+                _endpoint_error_claim = None
                 if _base_url and _api_key:
+                    try:
+                        from api.config import _models_endpoint_error_claim
+
+                        # Ownership is claimed before the request (#8158).
+                        _endpoint_error_claim = _models_endpoint_error_claim(provider)
+                    except Exception:
+                        _endpoint_error_claim = None
                     try:
                         import urllib.request
                         import json
@@ -25354,11 +25362,11 @@ def _handle_live_models(handler, parsed):
 
                 # A successful same-owner live probe clears the retained
                 # catalog diagnostic for this provider (#8158); fallbacks do not.
-                if _custom_live_probe_succeeded:
+                if _custom_live_probe_succeeded and _endpoint_error_claim is not None:
                     try:
                         from api.config import _clear_cached_models_endpoint_error
 
-                        _clear_cached_models_endpoint_error(provider, ids)
+                        _clear_cached_models_endpoint_error(_endpoint_error_claim, ids)
                     except Exception:
                         logger.debug(
                             "Failed to clear cached models_endpoint_error for %s",

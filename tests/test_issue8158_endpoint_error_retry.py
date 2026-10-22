@@ -317,6 +317,9 @@ def test_profile_keys_coalesce_independently(monkeypatch):
         lambda name, purpose="": nullcontext(),
         raising=False,
     )
+    # Coalescing-key separation only: the scheduler otherwise refuses a
+    # profile whose identity is not current (see the ownership tests below).
+    monkeypatch.setattr(config, "_models_build_identity_current", lambda fp, profile: True)
 
     with _CatalogState():
         catalog = _seed_errored_catalog()
@@ -414,7 +417,7 @@ def _install_provider_model_ids(monkeypatch, fn):
     monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
 
 
-def _run_live_models(monkeypatch, *, fail):
+def _run_live_models(monkeypatch, *, fail, during_request=None):
     import api.profiles as profiles
     import api.routes as routes
 
@@ -440,6 +443,8 @@ def _run_live_models(monkeypatch, *, fail):
     def fake_urlopen(req, timeout=None):
         if fail:
             raise OSError("probe failed")
+        if during_request is not None:
+            during_request(config_data)
         return _payload_response(["chat-a", "chat-b"])
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -498,3 +503,91 @@ def test_live_probe_failure_keeps_cached_endpoint_error(monkeypatch):
         group = _cached_group("custom:test-gateway")
     assert "models_endpoint_error" in group
     assert group["models"] == []
+
+
+def test_retry_uses_scheduling_profile_config_not_a_later_global_load(monkeypatch):
+    """A's worker paused; B's config (same slug, other endpoint/key) loads; A resumes."""
+    import api.profiles as profiles
+    from contextlib import contextmanager
+
+    entered = threading.Event()
+    release = threading.Event()
+    requests = []
+
+    @contextmanager
+    def paused_scope(name, purpose=""):
+        entered.set()  # worker started, has not read any provider config yet
+        assert release.wait(timeout=10)
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", paused_scope, raising=False)
+
+    def fake_urlopen(req, timeout=None):
+        requests.append((req.full_url, req.get_header("Authorization")))
+        return _payload_response(["a-model"])
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with _CatalogState():
+        _seed_errored_catalog()
+        config.get_available_models()
+        assert entered.wait(timeout=5)
+        config.cfg = copy.deepcopy(config.cfg)
+        config.cfg["custom_providers"][0].update(
+            base_url="https://profile-b.example/v1", api_key="b-key"
+        )
+        release.set()
+        assert _wait_until(_retry_inflight_empty)
+
+        assert requests == [("https://broken.example/v1/models", "Bearer bad-key")]
+        recovered = _cached_group("custom:broken-proxy")
+    assert "models_endpoint_error" not in recovered
+    assert [m["id"] for m in recovered["models"]] == ["@custom:broken-proxy:a-model"]
+
+
+def test_recovery_applies_serialized_allowlist(monkeypatch):
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda req, timeout=None: _payload_response(
+            ["chat-a", "image-unwanted", "audio-unwanted"]
+        ),
+    )
+    with _CatalogState():
+        _seed_errored_catalog()
+        config.cfg["custom_providers"][0]["models"] = '["chat-a"]'
+        config.get_available_models()
+        assert _wait_until(
+            lambda: "models_endpoint_error" not in _cached_group("custom:broken-proxy")
+        )
+        assert [m["id"] for m in _cached_group("custom:broken-proxy")["models"]] == [
+            "@custom:broken-proxy:chat-a"
+        ]
+
+
+def _publish_successor_catalog(_config_data):
+    config._models_rebuild_seq += 1
+    config._available_models_cache = copy.deepcopy(config._available_models_cache)
+    group = config._available_models_cache["groups"][0]
+    group["models"] = [{"id": "@custom:test-gateway:new-current", "label": "new-current"}]
+
+
+def _repoint_endpoint(config_data):
+    config_data["custom_providers"][0]["base_url"] = "https://new-gateway.example/v1"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("change", [_publish_successor_catalog, _repoint_endpoint])
+def test_old_live_response_does_not_patch_a_successor_catalog(monkeypatch, change):
+    with _CatalogState():
+        config.cfg = {
+            "model": {"provider": "openai-codex", "default": "gpt-5.5"},
+            "providers": {},
+            "fallback_providers": [],
+            "custom_providers": [],
+        }
+        _run_live_models(monkeypatch, fail=False, during_request=change)
+        group = _cached_group("custom:test-gateway")
+    assert "models_endpoint_error" in group
+    assert not any("chat-a" in m["id"] for m in group["models"])
