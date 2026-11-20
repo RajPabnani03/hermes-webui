@@ -213,18 +213,6 @@ def regeneration_revision_for(rows, *, session=None, context=None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def regeneration_transcript(session, *, state_messages=None):
-    """Return the state.db-reconciled transcript used by every authority consumer."""
-    if state_messages is None:
-        return regeneration_state(session)[0]
-    from api.models import reconciled_state_db_messages_for_session
-    return reconciled_state_db_messages_for_session(session, state_messages=state_messages)
-
-
-def regeneration_context(session):
-    return regeneration_state(session)[1]
-
-
 _REGENERATION_SIDECAR_ANCHOR_BUDGET = 200
 
 

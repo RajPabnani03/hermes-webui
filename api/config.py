@@ -3376,11 +3376,6 @@ CUSTOM_SELECTION_KEYED = "keyed"           # identity-owned providers:/model: re
 CUSTOM_SELECTION_RESOLVER = "resolver"     # injected connection_resolver reported a pair
 CUSTOM_SELECTION_MISSING = "missing"       # no authority owns this slug
 CUSTOM_SELECTION_MALFORMED = "malformed"   # ``custom:`` with no slug behind it
-# ``ambiguous`` is never RETURNED: a slug collision raises
-# AmbiguousCustomProviderError out of _unique_custom_provider_entry, so the
-# actionable rename message reaches the user (routes turn it into a 400) instead
-# of being silently degraded into a keyless or ambient-authority send.
-CUSTOM_SELECTION_AMBIGUOUS = "ambiguous"
 # Statuses for which NO authority owns the route.
 CUSTOM_SELECTION_UNOWNED = (CUSTOM_SELECTION_MISSING, CUSTOM_SELECTION_MALFORMED)
 
