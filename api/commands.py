@@ -67,13 +67,6 @@ def _bundle_profile_context(purpose: str):
     return profile_env_for_active_request(purpose, logger_override=logger)
 
 
-def _normalize_agent_command_name(command: str) -> str:
-    """Normalize slash text to a canonical command name."""
-
-    canonical, _arg_string = _parse_agent_command(command)
-    return canonical
-
-
 def list_commands(_registry=None) -> list[dict[str, Any]]:
     """Return COMMAND_REGISTRY entries as JSON-friendly dicts.
 

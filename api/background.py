@@ -79,9 +79,3 @@ def get_background_tasks(parent_sid: str) -> list[dict[str, Any]]:
     """Return all background tasks (running and done) for a parent session."""
     with _lock:
         return list(_BACKGROUND_TASKS.get(parent_sid, []))
-
-
-def cleanup_btw(parent_sid: str) -> dict[str, Any] | None:
-    """Remove and return btw tracking for a parent session."""
-    with _lock:
-        return _BTW_TRACKING.pop(parent_sid, None)

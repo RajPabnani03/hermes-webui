@@ -608,11 +608,6 @@ def _manifest_path_with_status(root: Path) -> Tuple[Optional[Path], str]:
     return manifest, "configured"
 
 
-def _manifest_path(root: Path) -> Optional[Path]:
-    manifest, _ = _manifest_path_with_status(root)
-    return manifest
-
-
 def _manifest_asset_url(value: object, asset_base: str = "") -> str:
     """Normalize a manifest asset entry to the existing same-origin URL format."""
     if not isinstance(value, str):
@@ -1378,15 +1373,6 @@ def _read_manifest_urls_with_diagnostics(
         }
     )
     return scripts, stylesheets, sidecars, manifest_status
-
-
-def _read_manifest_urls(
-    root: Path, disabled_ids: Optional[Set[str]] = None
-) -> Tuple[List[str], List[str]]:
-    scripts, stylesheets, _, _ = _read_manifest_urls_with_diagnostics(
-        root, disabled_ids=disabled_ids
-    )
-    return scripts, stylesheets
 
 
 def get_extension_config() -> Dict[str, Any]:

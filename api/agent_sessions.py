@@ -101,7 +101,6 @@ MESSAGING_SOURCES = {
     'signal',
 }
 
-CLI_MIN_UNTITLED_MESSAGE_COUNT = 6
 CLI_MIN_UNTITLED_USER_MESSAGE_COUNT = 2
 
 # Sub-second scheduling/write-order races during a compression/cli_close

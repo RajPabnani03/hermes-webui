@@ -1437,12 +1437,6 @@ def _repo_path_for_update_target(target: str):
     return None
 
 
-def _commit_subjects_for_update(info: dict, *, limit: int = 24) -> list[str]:
-    """Return commit subjects for an update range, if the local git refs exist."""
-    subjects, _truncated = _commit_subjects_for_update_with_limit(info, limit=limit)
-    return subjects
-
-
 def _commit_subjects_for_update_with_limit(info: dict, *, limit: int = 24) -> tuple[list[str], bool]:
     """Return recent commit subjects plus whether the local list was capped."""
     if not isinstance(info, dict):
@@ -1610,11 +1604,6 @@ def _format_update_summary_sections(summary_text: str, details: list[dict]) -> t
         lines.extend(f"- {item}" for item in section['items'])
         lines.append('')
     return sections, '\n'.join(lines).strip()
-
-
-def _fallback_update_summary(updates: dict, details: list[dict]) -> str:
-    _sections, summary = _format_update_summary_sections('', details)
-    return summary
 
 
 def _update_summary_prompt(details: list[dict]) -> tuple[str, str]:

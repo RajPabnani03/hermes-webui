@@ -106,12 +106,6 @@ def _pending_oauth_flow_for_locked(provider: str, hermes_home: Path) -> tuple[st
     return None
 
 
-def _pending_oauth_flow_for(provider: str, hermes_home: Path) -> tuple[str, dict[str, Any]] | None:
-    """Return an existing live onboarding OAuth flow for the provider/profile, if any."""
-    with _OAUTH_FLOWS_LOCK:
-        return _pending_oauth_flow_for_locked(provider, hermes_home)
-
-
 def _clear_process_anthropic_env_values() -> None:
     """Clear Anthropic process env fallbacks under the streaming env lock."""
     from api.streaming import _ENV_LOCK

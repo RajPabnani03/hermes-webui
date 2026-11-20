@@ -1404,21 +1404,6 @@ def _get_provider_api_key(provider_id: str) -> str | None:
     return None
 
 
-def provider_has_usable_credential(provider_id: str, *, refresh: bool = False) -> bool:
-    """Return True when a provider has a currently usable configured credential."""
-    provider = str(provider_id or "").strip().lower()
-    if not provider:
-        return False
-    if refresh:
-        try:
-            from api.config import invalidate_credential_pool_cache
-
-            invalidate_credential_pool_cache(provider)
-        except Exception:
-            logger.debug("Failed to refresh credential pool before provider availability check", exc_info=True)
-    return _get_provider_api_key(provider) is not None
-
-
 def provider_has_usable_pool_credential(provider_id: str, *, refresh: bool = False) -> bool:
     """Return True only when the provider's credential-pool lane has a usable entry."""
     provider = str(provider_id or "").strip().lower()
@@ -1596,12 +1581,6 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
     if isinstance(pool, dict):
         result["pool"] = pool
     return result
-
-
-def _agent_fetch_account_usage(provider: str, *, base_url: str | None = None, api_key: str | None = None) -> Any:
-    from agent.account_usage import fetch_account_usage
-
-    return fetch_account_usage(provider, base_url=base_url, api_key=api_key)
 
 
 def _account_usage_subprocess_env(home: Path, provider: str, api_key: str | None) -> dict[str, str]:

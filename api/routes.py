@@ -1027,11 +1027,6 @@ def _find_skill_in_dirs(name: str, skills_dirs: list[Path]) -> tuple[Path | None
     return None, None
 
 
-def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path | None]:
-    """Resolve a WebUI skill name inside an explicit skills directory."""
-    return _find_skill_in_dirs(name, [skills_dir])
-
-
 # Cap on the courtesy list of names carried by a skill-not-found reply. The
 # bound stays; what it must never do is present a partial list as the whole
 # set, because a caller that cannot find its skill in `available_skills` will
@@ -7736,33 +7731,6 @@ def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None
     return parsed
 
 
-def _load_profile_config_dict(session) -> dict | None:
-    """Load the session profile's config.yaml as a dict, or None."""
-    if not getattr(session, "profile", None):
-        return None
-    try:
-        from api.profiles import get_hermes_home_for_profile
-
-        _profile_cfg_path = os.path.join(
-            str(get_hermes_home_for_profile(session.profile)),
-            "config.yaml",
-        )
-        if not os.path.isfile(_profile_cfg_path):
-            return None
-        from api import yaml_compat as yaml
-
-        with open(_profile_cfg_path, encoding="utf-8") as _f:
-            _pcfg = yaml.safe_load(_f) or {}
-        return _pcfg if isinstance(_pcfg, dict) else None
-    except Exception:
-        logger.warning(
-            "profile config read failed for %r",
-            getattr(session, "profile", None),
-            exc_info=True,
-        )
-        return None
-
-
 def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
     """Model ids from a custom_providers entry (default model + dict/list models)."""
     ordered: list[str] = []
@@ -9434,24 +9402,6 @@ def _is_messaging_session_record(session) -> bool:
     return _is_known_messaging_source(raw)
 
 
-def _messages_include_tool_metadata(messages) -> bool:
-    """Return true when returned messages can reconstruct their own tool cards."""
-    if not isinstance(messages, list):
-        return False
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            continue
-        if isinstance(msg.get("tool_calls"), list) and msg.get("tool_calls"):
-            return True
-        content = msg.get("content")
-        if isinstance(content, list) and any(
-            isinstance(part, dict) and part.get("type") == "tool_use"
-            for part in content
-        ):
-            return True
-    return False
-
-
 def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: int) -> list:
     """Keep session-level tool calls that point into a returned message window.
 
@@ -10076,52 +10026,6 @@ def _display_merge_cache_key(
         getattr(session, "truncation_watermark", None),
         getattr(session, "truncation_boundary", None),
     )
-
-
-def _state_db_target_session_signature(db_path, session_id):
-    """Hash every target-session row without materialising display dictionaries."""
-    try:
-        uri_path = quote(str(Path(db_path).resolve()), safe="/")
-        with closing(
-            sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True, timeout=5.0)
-        ) as conn:
-            conn.execute("PRAGMA query_only=ON")
-            columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")]
-            if "session_id" not in columns or "id" not in columns:
-                return None
-            quoted_columns = ", ".join(
-                '"' + column.replace('"', '""') + '"' for column in columns
-            )
-            conn.text_factory = lambda raw: ("text", raw)
-            rows = conn.execute(
-                f'SELECT {quoted_columns} FROM messages '
-                'WHERE session_id = ? ORDER BY id',
-                (str(session_id),),
-            )
-            digest = hashlib.blake2b(digest_size=32)
-            digest.update("\x1f".join(columns).encode("utf-8"))
-            row_count = 0
-            for row in rows:
-                row_count += 1
-                for value in row:
-                    if value is None:
-                        tag, payload = b"n", b""
-                    elif isinstance(value, tuple) and value[:1] == ("text",):
-                        tag, payload = b"t", value[1]
-                    elif isinstance(value, bytes):
-                        tag, payload = b"b", value
-                    elif isinstance(value, int):
-                        tag, payload = b"i", str(value).encode("ascii")
-                    elif isinstance(value, float):
-                        tag, payload = b"f", value.hex().encode("ascii")
-                    else:
-                        return None
-                    digest.update(tag)
-                    digest.update(len(payload).to_bytes(8, "big"))
-                    digest.update(payload)
-            return ("streaming-target", row_count, digest.hexdigest())
-    except (OSError, sqlite3.Error, ValueError):
-        return None
 
 
 def _state_db_target_session_revision(db_path, session_id):
@@ -19916,14 +19820,6 @@ def _sse_offline_gap_recovery(handler, stream_id: str, offline_dropped: int) -> 
             "offline_dropped_events": offline_dropped,
         },
     )
-
-
-def _runner_stream_cursor_from_query(qs: dict) -> str | None:
-    cursor = str(qs.get("cursor", [""])[0] or "").strip()
-    if cursor:
-        return cursor
-    after_seq = _parse_run_journal_after_seq(qs)
-    return str(after_seq) if after_seq is not None else None
 
 
 def _runner_event_name(entry: dict) -> str:
