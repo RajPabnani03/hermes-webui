@@ -15646,12 +15646,6 @@ function _compressionCardsHtml(state){
     </div>
     ${referenceHtml}`;
 }
-function _autoCompressionBaseDetail(state){
-  const running=state&&state.phase==='running';
-  if(running)return 'Compressing context';
-  if(state&&state.phase==='done')return 'Context auto-compressed';
-  return '';
-}
 function _autoCompressionPreviewText(state){
   const running=state&&state.phase==='running';
   if(running)return 'Compressing context';
@@ -19454,7 +19448,6 @@ function _toolActionLabelText(tc, opts){
 function _toolActionLabel(tc){
   return esc(_toolActionLabelText(tc,{limit:112}));
 }
-const _toolWorklogSummaries={shell:{},read:{},list:{},search:{},web:{},write:{},skill:{},memory:{},delegate:{},unknown:{}};
 function _toolWorklogSummaryLine(kind, state, count){
   const n=Math.max(1,Number(count)||1);
   return _toolI18n('tool_worklog_summary',(k,s,c)=>{
@@ -19966,17 +19959,6 @@ function _activityLatestToolName(group){
   const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
   const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
   return _toolCardVisibleNameText(latest);
-}
-
-function _activityWaitingDetail(group,label=''){
-  const toolName=_activityLatestToolName(group);
-  if(toolName){
-    const action=_activityProgressLabelForToolName(toolName);
-    if(group&&group.querySelector('.tool-card.tool-card-running')) return `${action}: ${toolName}. Results will appear here.`;
-    return `Last step: ${action} (${toolName}); now choosing the next action or composing a response.`;
-  }
-  if(String(label||'').toLowerCase().includes('model')) return 'Reviewing the prompt and context, then choosing the next action or composing the response.';
-  return 'The agent is running; tool results and response text will appear here.';
 }
 
 function _activityLiveProgressLabel(group){

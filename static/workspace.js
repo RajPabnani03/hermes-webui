@@ -335,16 +335,6 @@ function scheduleRenderSessionArtifacts(){
   }, 100);
 }
 
-function _workspaceTodosHash(items){
-  if(!Array.isArray(items)) return '';
-  let h=items.length+'|';
-  for(let i=0;i<items.length;i++){
-    const t=items[i]||{};
-    h+=String(t.id==null?'':t.id)+'\x1f'+String(t.content==null?(t.text==null?'':t.text):t.content)+'\x1f'+String(t.status==null?'':t.status)+'\x1e';
-  }
-  return h;
-}
-
 function _workspaceTodosTabIsActive(){
   if(typeof window==='undefined'||window._workspaceTodosTab!==true) return false;
   if(typeof document==='undefined') return false;

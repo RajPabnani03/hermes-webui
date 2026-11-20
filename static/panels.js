@@ -6009,20 +6009,6 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   ));
 }
 
-function toggleWsDropdown(){
-  const dd=$('wsDropdown');
-  if(!dd)return;
-  const open=dd.classList.contains('open');
-  if(open){closeWsDropdown();}
-  else{
-    closeProfileDropdown(); // close profile dropdown if open
-    loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?.workspace||S._profileDefaultWorkspace||data.last||'');
-      _setWorkspaceDropdownOpenState(dd,true);
-    });
-  }
-}
-
 function toggleComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceChip');
@@ -6437,17 +6423,6 @@ function _wireWorkspaceFormPathSuggestions(){
 document.addEventListener('click',e=>{
   if(!e.target.closest('.workspace-form-path-wrap')) closeWorkspacePathSuggestions();
 });
-
-async function removeWorkspace(path){
-  const _rmWs=await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
-  if(!_rmWs) return;
-  try{
-    const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify({path})});
-    _workspaceList=data.workspaces;
-    renderWorkspacesPanel(data.workspaces);
-    showToast(t('workspace_removed'));
-  }catch(e){setStatus(t('remove_failed')+e.message);}
-}
 
 async function promptWorkspacePath(){
   // Opus review Q6: if called from blank page (no session), auto-create one first.

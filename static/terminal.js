@@ -738,10 +738,6 @@ async function copyComposerTerminalOutput(){
   }
 }
 
-async function submitComposerTerminalInput(ev){
-  if(ev)ev.preventDefault();
-}
-
 function _scheduleTerminalResize(){
   clearTimeout(TERMINAL_UI.resizeTimer);
   TERMINAL_UI.resizeTimer=setTimeout(_resizeComposerTerminal,120);

@@ -3450,17 +3450,6 @@ function sidValue() {
   return S && S.session && S.session.session_id ? S.session.session_id : null;
 }
 
-function _extractHandoffSummaryPayload(content){
-  if(!content) return null;
-  if(typeof content!=='string') return null;
-  try {
-    const parsed=JSON.parse(content);
-    return parsed&&typeof parsed==='object'&&parsed._handoff_summary_card===true?parsed:null;
-  } catch (e) {
-    return null;
-  }
-}
-
 async function _generateHandoffSummary(sid, rounds) {
   // Treat handoff like a slash-command result: the composer dock entry
   // disappears and the transient summary card renders in the transcript.
@@ -4684,10 +4673,6 @@ function _pinnedSessionCount(){
 function _getPinnedSessionsLimit(){
   const limit=parseInt(window._pinnedSessionsLimit||3,10);
   return (Number.isFinite(limit)&&limit>0)?limit:3;
-}
-function _pinnedSessionsLimitMessage(){
-  const limit=_getPinnedSessionsLimit();
-  return `Only ${limit} conversations can be pinned. Unpin one before pinning another.`;
 }
 function _worktreeSessionCount(ids){
   return (ids||[]).reduce((count,sid)=>{
@@ -7503,12 +7488,6 @@ function _sessionSegmentCount(s){
   if(Array.isArray(s._lineage_segments)) counts.push(s._lineage_segments.length);
   const count=Math.max(0,...counts.map(n=>Number.isFinite(n)?n:0));
   return count>1?count:0;
-}
-
-function _clearLineageReportCache(){
-  _lineageReportCache.clear();
-  _lineageReportInflight.clear();
-  _lineageReportCacheGeneration++;
 }
 
 function _pruneLineageReportCacheToVisibleSessions(sessions){
